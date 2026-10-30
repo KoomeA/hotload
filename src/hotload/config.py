@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     s3_prefix: str = "hotload/"
     s3_presign_seconds: int = 900
     worker_queue: str | None = None  # arq queue this worker serves; see docs/SCALING.md
+    # Fernet key(s) for saved cookies, comma separated (first encrypts, all decrypt: rotation). Unset = feature off.
+    # Generate one with: python -m hotload.admin cookie-key
+    cookie_key: str | None = None
     redis_url: str = "redis://localhost:6379/0"
     data_dir: Path = Path("data")
     file_ttl_seconds: int = 3600

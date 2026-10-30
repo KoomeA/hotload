@@ -115,7 +115,7 @@ class DownloadResult:
     site: str | None = None
 
 
-def _base_opts(settings: Settings, proxy: str | None = None) -> dict:
+def _base_opts(settings: Settings, proxy: str | None = None, cookiefile: Path | None = None) -> dict:
     opts: dict = {
         "quiet": True,
         "no_warnings": True,
@@ -129,15 +129,17 @@ def _base_opts(settings: Settings, proxy: str | None = None) -> dict:
     }
     if proxy:
         opts["proxy"] = proxy
+    if cookiefile:
+        opts["cookiefile"] = str(cookiefile)
     if settings.ffmpeg_location:
         opts["ffmpeg_location"] = settings.ffmpeg_location
     return opts
 
 
-def extract(url: str, settings: Settings, proxy: str | None = None) -> dict:
+def extract(url: str, settings: Settings, proxy: str | None = None, cookiefile: Path | None = None) -> dict:
     """Return sanitised metadata for the UI (no download)."""
     try:
-        with SafeYoutubeDL({**_base_opts(settings, proxy), "skip_download": True}, settings) as ydl:
+        with SafeYoutubeDL({**_base_opts(settings, proxy, cookiefile), "skip_download": True}, settings) as ydl:
             info = ydl.extract_info(url, download=False)
     except YoutubeDLError as exc:
         raise _wrap(exc) from exc
@@ -176,6 +178,7 @@ def build_download_opts(
     workdir: Path,
     preset: Preset,
     proxy: str | None = None,
+    cookiefile: Path | None = None,
     start: float | None = None,
     end: float | None = None,
     subtitle_langs: list[str] | None = None,
@@ -189,7 +192,7 @@ def build_download_opts(
     blocked_media: frozenset[str] = frozenset(),
     progress: Callable[[dict], None] | None = None,
 ) -> dict:
-    opts = _base_opts(settings, proxy)
+    opts = _base_opts(settings, proxy, cookiefile)
     langs = [validate_lang(code) for code in (subtitle_langs or [])]
     if preset.subs_only and not langs:
         raise EngineError("Choose at least one subtitle language")
@@ -266,9 +269,9 @@ _SKIP_SUFFIXES = {".part", ".ytdl", ".jpg", ".jpeg", ".webp", ".png", ".json", "
 _SUB_SUFFIXES = {".srt", ".vtt", ".ass", ".lrc"}
 
 
-def download(url: str, settings: Settings, workdir: Path, preset: Preset, proxy: str | None = None, **kwargs) -> DownloadResult:
+def download(url: str, settings: Settings, workdir: Path, preset: Preset, proxy: str | None = None, cookiefile: Path | None = None, **kwargs) -> DownloadResult:
     workdir.mkdir(parents=True, exist_ok=True)
-    opts = build_download_opts(settings, workdir, preset, proxy=proxy, **kwargs)
+    opts = build_download_opts(settings, workdir, preset, proxy=proxy, cookiefile=cookiefile, **kwargs)
     try:
         with SafeYoutubeDL(opts, settings) as ydl:
             info = ydl.extract_info(url, download=True)

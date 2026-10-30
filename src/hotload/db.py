@@ -144,6 +144,20 @@ class Report(Base):
                 "status": self.status, "created": self.created, "resolved": self.resolved}
 
 
+class UserCookie(Base):
+    """A user's own site cookies for one domain, Fernet-encrypted. Never returned by the API, never logged."""
+
+    __tablename__ = "user_cookies"
+    __table_args__ = (UniqueConstraint("user_id", "domain"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(32), index=True)
+    domain: Mapped[str] = mapped_column(String(255))
+    blob: Mapped[str] = mapped_column(String(200000))
+    count: Mapped[int] = mapped_column(Integer, default=0)
+    created: Mapped[float] = mapped_column(Float, default=time.time)
+
+
 class Database:
     def __init__(self, settings: Settings):
         self.engine: AsyncEngine = create_async_engine(settings.db_url)
@@ -196,6 +210,7 @@ class Database:
     async def delete_user(self, user_id: str) -> None:
         async with self.session() as s:
             await s.execute(delete(HistoryEntry).where(HistoryEntry.user_id == user_id))
+            await s.execute(delete(UserCookie).where(UserCookie.user_id == user_id))
             await s.execute(delete(User).where(User.id == user_id))
             await s.commit()
 
@@ -259,6 +274,26 @@ class Database:
             user = await s.get(User, user_id)
             user.tier, user.tier_expires = tier, expires
             await s.commit()
+
+    # --- saved cookies
+    async def put_cookie(self, user_id: str, domain: str, blob: str, count: int) -> None:
+        async with self.session() as s:
+            row = (await s.execute(select(UserCookie).where(UserCookie.user_id == user_id, UserCookie.domain == domain))).scalar_one_or_none()
+            if row:
+                row.blob, row.count, row.created = blob, count, time.time()
+            else:
+                s.add(UserCookie(user_id=user_id, domain=domain, blob=blob, count=count))
+            await s.commit()
+
+    async def list_cookies(self, user_id: str) -> list[UserCookie]:
+        async with self.session() as s:
+            return list((await s.execute(select(UserCookie).where(UserCookie.user_id == user_id).order_by(UserCookie.domain))).scalars())
+
+    async def delete_cookie(self, user_id: str, domain: str) -> bool:
+        async with self.session() as s:
+            res = await s.execute(delete(UserCookie).where(UserCookie.user_id == user_id, UserCookie.domain == domain))
+            await s.commit()
+            return res.rowcount == 1
 
     # --- admin: blocklist, reports, users
     async def set_admin(self, email: str, value: bool) -> bool:

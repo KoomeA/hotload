@@ -14,6 +14,7 @@ from arq.connections import RedisSettings
 from . import canary, engine, logging_setup, metrics, storage, webhooks
 from .blocklist import Blocklist
 from .config import get_settings
+from .cookies import CookieVault
 from .db import Database
 from .jobs import JobStore
 from .logging_setup import log, url_ref
@@ -31,11 +32,28 @@ def get_pool() -> ProxyPool:
 
 
 async def run_download(ctx: dict, job_id: str) -> None:
-    settings = get_settings()
-    store: JobStore = ctx["store"]
-    job = await store.get(job_id)
+    job = await ctx["store"].get(job_id)
     if job is None:
         return
+    vault = ctx.get("vault")
+    if job.use_cookies and job.user_id and vault is not None and vault.enabled:
+        # The private cookie file exists only for the duration of the download and is always removed.
+        async with vault.file_for(job.user_id, job.url) as cookie_path:
+            if cookie_path is None:
+                job.state, job.message = "error", "Your saved cookies for this site were removed. Add them again."
+                await ctx["store"].save(job)
+                return
+            await _run_download(ctx, job, cookie_path)
+    elif job.use_cookies:
+        job.state, job.message = "error", "Saved cookies are not available on this server."
+        await ctx["store"].save(job)
+    else:
+        await _run_download(ctx, job, None)
+
+
+async def _run_download(ctx: dict, job, cookie_path) -> None:
+    settings = get_settings()
+    store: JobStore = ctx["store"]
     job.state, job.message = "running", "Starting"
     await store.save(job)
     redis = store.redis
@@ -79,7 +97,7 @@ async def run_download(ctx: dict, job_id: str) -> None:
             result = await asyncio.to_thread(
                 partial(
                     engine.download, job.url, settings, storage.job_dir(settings.output_dir, job.id),
-                    engine.PRESETS[job.preset], proxy=proxy, start=job.start, end=job.end,
+                    engine.PRESETS[job.preset], proxy=proxy, cookiefile=cookie_path, start=job.start, end=job.end,
                     subtitle_langs=job.subtitle_langs, subtitle_format=job.subtitle_format,
                     subtitle_mode=job.subtitle_mode, subtitle_auto=job.subtitle_auto,
                     audio_lang=job.audio_lang, sponsorblock=job.sponsorblock, max_duration=job.max_duration,
@@ -195,6 +213,7 @@ async def startup(ctx: dict) -> None:
     ctx["queue_name"] = s.worker_queue
     ctx["db"] = Database(s)
     await ctx["db"].migrate()
+    ctx["vault"] = CookieVault(s, ctx["db"])
 
 
 async def shutdown(ctx: dict) -> None:

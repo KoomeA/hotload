@@ -132,7 +132,7 @@ def test_reporting_does_not_fetch_the_reported_url(c, monkeypatch):
 # --- enforcement --------------------------------------------------------------------------------
 
 def test_host_rule_blocks_subdomains_across_every_entry_point(c, monkeypatch):
-    monkeypatch.setattr(engine, "extract", lambda url, s, proxy=None: {"title": "t", "site": "X", "id": "1", "age_limit": 0})
+    monkeypatch.setattr(engine, "extract", lambda url, s, proxy=None, **k: {"title": "t", "site": "X", "id": "1", "age_limit": 0})
     monkeypatch.setattr(engine, "extract_playlist", lambda url, s, proxy=None, limit=50: {"playlist": True, "title": "p", "count": 2, "entries": [
         {"url": "https://bad.example.org/a", "title": "a"}, {"url": "https://fine.example.com/b", "title": "b"}]})
     as_admin(c)
@@ -157,7 +157,7 @@ def test_url_rule_is_exact_after_normalisation(c):
 
 
 def test_media_rule_blocks_by_id_however_the_link_is_written(c, monkeypatch):
-    def fake(url, s, proxy=None):
+    def fake(url, s, proxy=None, **k):
         vid = "jNQXAC9IVRw" if "jNQ" in url else "other"
         return {"title": "t", "site": "Youtube", "id": vid, "age_limit": 0}
 

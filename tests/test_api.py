@@ -10,13 +10,13 @@ def test_health_and_presets(client):
 
 
 def test_extract_flags_adult(client, monkeypatch):
-    monkeypatch.setattr(engine, "extract", lambda url, s, proxy=None: {"title": "t", "age_limit": 18})
+    monkeypatch.setattr(engine, "extract", lambda url, s, proxy=None, **k: {"title": "t", "age_limit": 18})
     r = client.post("/api/v1/extract", json={"url": "https://example.com/v"})
     assert r.status_code == 200 and r.json()["age_gate_required"] is True
 
 
 def test_extract_engine_error(client, monkeypatch):
-    def boom(url, s, proxy=None):
+    def boom(url, s, proxy=None, **k):
         raise engine.EngineError("Unsupported URL")
 
     monkeypatch.setattr(engine, "extract", boom)

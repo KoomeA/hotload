@@ -25,9 +25,16 @@ async def run(action: str, email: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Hotload admin commands")
-    ap.add_argument("action", choices=["grant", "revoke"])
-    ap.add_argument("email")
+    ap.add_argument("action", choices=["grant", "revoke", "cookie-key"])
+    ap.add_argument("email", nargs="?")
     args = ap.parse_args(argv)
+    if args.action == "cookie-key":  # prints a fresh key for HOTLOAD_COOKIE_KEY; store it in your secret manager
+        from cryptography.fernet import Fernet
+
+        print(Fernet.generate_key().decode())
+        return 0
+    if not args.email:
+        ap.error("an email is required for grant/revoke")
     return asyncio.run(run(args.action, args.email))
 
 

@@ -37,12 +37,14 @@ from .. import (
 )
 from ..billing.service import BillingService, build_providers
 from ..config import Settings, get_settings
+from ..cookies import CookieVault
 from ..db import Database
 from ..jobs import BatchStore, JobStore
 from ..proxies import NoProxyAvailable, ProxyPool
 from .accounts import add_account_routes, origin_allowed
 from .admin import RuleCache, add_admin_routes
 from .billing import add_billing_routes
+from .cookies import add_cookie_routes
 from .keys import add_key_routes, record_usage
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -50,6 +52,7 @@ WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
 class ExtractRequest(BaseModel):
     url: str
+    use_cookies: bool = False
 
 
 class JobOptions(BaseModel):
@@ -62,6 +65,7 @@ class JobOptions(BaseModel):
     subtitle_auto: bool = False
     audio_lang: str | None = None
     sponsorblock: Literal["off", "mark", "remove"] = "off"
+    use_cookies: bool = False  # use my saved cookies for this site (see docs/COOKIES.md)
     age_confirmed: bool = False
     webhook_url: str | None = Field(default=None, max_length=2048)  # API keys only: signed POST when the job finishes
 
@@ -103,6 +107,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         await app.state.db.migrate()
         app.state.sessions = auth.Sessions(secret)
         app.state.rules = RuleCache(app.state.db)
+        app.state.vault = CookieVault(settings, app.state.db)
         app.state.remote = storage.build_remote(settings)
         app.state.http = http_client or httpx.AsyncClient(follow_redirects=False)
         app.state.billing = BillingService(settings, app.state.db, build_providers(settings, app.state.http))
@@ -181,7 +186,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
             raise HTTPException(451, "This content is not available")
         return clean
 
-    def extract_with_retries(url: str) -> dict:
+    def extract_with_retries(url: str, cookiefile=None) -> dict:
         """Blocking: try up to `max_attempts` egress routes, rotating proxies on retryable failures."""
         pool: ProxyPool = app.state.pool
         tried: set[str] = set()
@@ -193,7 +198,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
                 break
             tried.add(proxy or "direct")
             try:
-                info = engine.extract(url, settings, proxy=proxy)
+                info = engine.extract(url, settings, proxy=proxy, cookiefile=cookiefile)
                 pool.report(proxy, True)
                 return info
             except engine.EngineError as exc:
@@ -232,8 +237,14 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
     async def extract(body: ExtractRequest, request: Request):
         _, _, key = await who(request)
         url = await guard(request, body.url, key=key)
+        user, _, _ = await who(request)
         try:
-            info = await asyncio.to_thread(extract_with_retries, url)
+            if body.use_cookies:
+                await require_cookie_access(user, url)
+                async with app.state.vault.file_for(user.id, url) as cookie_path:
+                    info = await asyncio.to_thread(extract_with_retries, url, cookie_path)
+            else:
+                info = await asyncio.to_thread(extract_with_retries, url)
         except engine.EngineError as exc:
             await metrics.inc(app.state.redis, "hotload_extract_total", result="error")
             raise HTTPException(503 if exc.retryable else 422, str(exc)) from exc
@@ -243,6 +254,17 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         info["adult"] = compliance.is_adult(url, info)
         info["age_gate_required"] = info["adult"] and settings.require_age_gate
         return info
+
+    async def require_cookie_access(user, url: str) -> None:
+        """Opting in to saved cookies needs an account whose plan allows it, with cookies saved for this very site."""
+        if user is None:
+            raise HTTPException(401, "Sign in to use your saved cookies")
+        if not app.state.vault.enabled:
+            raise HTTPException(503, "Saved cookies are not enabled on this server")
+        if settings.quotas_enabled and tiers.effective_name(user) == "free":
+            raise HTTPException(403, "Saved cookies need a Premium or Pro plan")
+        if await app.state.vault.match(user.id, url) is None:
+            raise HTTPException(400, "You have no saved cookies for this site")
 
     def queue_for(tier: tiers.Tier) -> str | None:
         """Paying plans go to the priority worker pool (only when plans are enforced, i.e. the hosted service)."""
@@ -290,7 +312,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         job = await app.state.store.create(
             url=url, preset=o.preset, start=o.start, end=o.end, subtitle_langs=o.subtitle_langs,
             subtitle_format=o.subtitle_format, subtitle_mode=o.subtitle_mode, subtitle_auto=o.subtitle_auto,
-            audio_lang=o.audio_lang, sponsorblock=o.sponsorblock, adult=adult, age_confirmed=o.age_confirmed, batch_id=batch_id,
+            audio_lang=o.audio_lang, sponsorblock=o.sponsorblock, use_cookies=o.use_cookies, adult=adult, age_confirmed=o.age_confirmed, batch_id=batch_id,
             user_id=user.id if user else None, key_id=key.id if key else None, webhook_url=webhook_url,
             max_duration=tier.max_duration if settings.quotas_enabled else None,
         )
@@ -304,6 +326,8 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         user, tier, key = await who(request)
         url = await guard(request, body.url, key=key)
         hook = await check_webhook(body, key)
+        if body.use_cookies:
+            await require_cookie_access(user, url)
         adult = precheck(url, body, tier)
         await spend_quota(request, user, tier, 1)
         job = await new_job(url, body, adult, user, tier, key=key, webhook_url=hook)
@@ -353,6 +377,9 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
             if rules.blocks_url(clean):
                 raise HTTPException(451, f"{raw[:80]}: this content is not available")
             urls.append(clean)
+        if body.use_cookies:
+            for u in urls:
+                await require_cookie_access(user, u)
         adults = [precheck(u, body, tier) for u in urls]
         await spend_quota(request, user, tier, len(urls))
         jobs = [await new_job(u, body, adult, user, tier, key=key, webhook_url=hook)
@@ -459,6 +486,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
     add_billing_routes(app, settings, client_ip)
     add_key_routes(app, settings)
     add_admin_routes(app, settings, client_ip)
+    add_cookie_routes(app, settings, client_ip)
 
     web_dir = settings.web_dir or WEB_DIR
     if web_dir.exists():
