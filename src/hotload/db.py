@@ -47,6 +47,7 @@ class User(Base):
     tier: Mapped[str] = mapped_column(String(16), default="free")
     tier_expires: Mapped[float | None] = mapped_column(Float, nullable=True)  # None = never (manual grants)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)  # set only from the server CLI, never by email
+    session_epoch: Mapped[int] = mapped_column(Integer, default=0)  # bump to revoke every existing session
     oauth_provider: Mapped[str | None] = mapped_column(String(16), nullable=True)
     oauth_sub: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created: Mapped[float] = mapped_column(Float, default=time.time)
@@ -207,10 +208,29 @@ class Database:
             user.oauth_provider, user.oauth_sub = provider, sub
             await s.commit()
 
+    async def bump_epoch(self, user_id: str) -> None:
+        async with self.session() as s:
+            await s.execute(update(User).where(User.id == user_id).values(session_epoch=User.session_epoch + 1))
+            await s.commit()
+
+    async def take_over_for_oauth(self, user_id: str, provider: str, sub: str) -> None:
+        """First verified provider login for an account that was created with a password.
+
+        Registration does not verify email, so whoever created that row may not own the address. The provider has just
+        proven that this person does. Everything the earlier holder could still use is therefore cut off: the password,
+        every live session (epoch bump), API keys and saved cookies.
+        """
+        async with self.session() as s, s.begin():
+            await s.execute(update(User).where(User.id == user_id).values(
+                oauth_provider=provider, oauth_sub=sub, password_hash=None, session_epoch=User.session_epoch + 1))
+            await s.execute(delete(ApiKey).where(ApiKey.user_id == user_id))
+            await s.execute(delete(UserCookie).where(UserCookie.user_id == user_id))
+
     async def delete_user(self, user_id: str) -> None:
         async with self.session() as s:
             await s.execute(delete(HistoryEntry).where(HistoryEntry.user_id == user_id))
             await s.execute(delete(UserCookie).where(UserCookie.user_id == user_id))
+            await s.execute(delete(ApiKey).where(ApiKey.user_id == user_id))
             await s.execute(delete(User).where(User.id == user_id))
             await s.commit()
 

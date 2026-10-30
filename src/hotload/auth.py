@@ -30,16 +30,25 @@ class Sessions:
             secret = secrets.token_urlsafe(48)
         self.signer = URLSafeTimedSerializer(secret, salt="hotload-session")
 
-    def issue(self, user_id: str) -> str:
-        return self.signer.dumps({"uid": user_id, "iat": int(time.time())})
+    def issue(self, user_id: str, epoch: int = 0) -> str:
+        return self.signer.dumps({"uid": user_id, "ep": epoch, "iat": int(time.time())})
 
-    def read(self, token: str | None) -> str | None:
+    def read(self, token: str | None) -> tuple[str, int] | None:
+        """(user id, session epoch) from a valid token. The caller must compare the epoch with the user's current one:
+        bumping `users.session_epoch` revokes every session issued before it."""
         if not token:
             return None
         try:
-            return self.signer.loads(token, max_age=MAX_AGE).get("uid")
+            data = self.signer.loads(token, max_age=MAX_AGE)
         except BadSignature:
             return None
+        uid = data.get("uid") if isinstance(data, dict) else None
+        return (uid, int(data.get("ep", 0))) if isinstance(uid, str) else None
+
+
+def safe_equal(a: str | None, b: str | None) -> bool:
+    """Constant-time string comparison that cannot raise on non-ASCII input (compare_digest on str can)."""
+    return hmac.compare_digest((a or "").encode("utf-8", "ignore"), (b or "").encode("utf-8", "ignore"))
 
 
 # --- API keys ---------------------------------------------------------------------------------------------

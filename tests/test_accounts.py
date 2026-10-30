@@ -216,7 +216,7 @@ def test_oauth_callback_creates_user_and_signs_in(oc, monkeypatch):
     assert oc.get("/api/v1/me").json()["email"] == "new@example.com"
 
 
-def test_oauth_links_existing_account_only_when_provider_verified_email(oc, monkeypatch):
+def test_oauth_takes_over_a_password_account_only_when_provider_verified_email(oc, monkeypatch):
     oc.post("/api/v1/auth/register", json=GOOD)
     uid = oc.get("/api/v1/me").json()["id"]
     oc.post("/api/v1/auth/logout")
@@ -226,7 +226,10 @@ def test_oauth_links_existing_account_only_when_provider_verified_email(oc, monk
     _profile(monkeypatch, sub="7", email="ada@example.com", email_verified=True)
     oc.get("/api/v1/auth/oauth/github/callback", follow_redirects=False)
     me = oc.get("/api/v1/me").json()
-    assert me["id"] == uid and me["provider"] == "github" and me["has_password"] is True
+    # same account (plan and history survive), but the password is gone: whoever registered it first can no longer use it
+    assert me["id"] == uid and me["provider"] == "github" and me["has_password"] is False
+    oc.post("/api/v1/auth/logout")
+    assert oc.post("/api/v1/auth/login", json=GOOD).status_code == 401
 
 
 def test_oauth_failure_and_closed_registration(make_client, monkeypatch):

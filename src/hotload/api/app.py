@@ -1,4 +1,5 @@
 import asyncio
+import ipaddress
 import json
 import secrets
 from contextlib import asynccontextmanager
@@ -100,7 +101,10 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
                http_client: httpx.AsyncClient | None = None) -> FastAPI:
     """App factory. `redis`, `enqueue` and `http_client` (payment providers) are injectable for tests."""
     settings = settings or get_settings()
-    secret = settings.secret_key or secrets.token_urlsafe(48)  # per-process if unset: sessions reset on restart
+    if settings.quotas_enabled and not settings.secret_key:
+        # Hosted mode with a random per-process secret means sessions and OAuth state break across replicas/restarts.
+        raise RuntimeError("HOTLOAD_SECRET_KEY must be set when HOTLOAD_QUOTAS_ENABLED=true (see docs/LAUNCH.md)")
+    secret = settings.secret_key or secrets.token_urlsafe(48)  # self-host default: random per process, sessions reset on restart
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -137,7 +141,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
 
     app = FastAPI(title="Hotload", version="0.1.0", lifespan=lifespan)
     app.add_middleware(SessionMiddleware, secret_key=secret, session_cookie="hl_oauth", same_site="lax",
-                       https_only=settings.cookie_secure, max_age=600)
+                       https_only=settings.secure_cookies, max_age=600)
 
     # CORS for API clients (browser extensions, third-party web apps). Credentials are NOT allowed, so browsers never
     # attach cookies to cross-origin calls: only Authorization-header API keys work cross-origin.
@@ -166,11 +170,19 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         return await call_next(request)
 
     def client_ip(request: Request) -> str:
+        """The caller's address. Behind a reverse proxy it is the Nth entry from the RIGHT of X-Forwarded-For, where N is
+        the number of proxies you run (HOTLOAD_TRUSTED_PROXY_HOPS): proxies append the real peer on the right, so the
+        left-most entry is whatever the client chose to send. Anything that is not a valid IP falls back to the socket."""
+        peer = request.client.host if request.client else "unknown"
         if settings.trust_proxy_headers:
-            fwd = request.headers.get("x-forwarded-for")
-            if fwd:
-                return fwd.split(",")[0].strip()
-        return request.client.host if request.client else "unknown"
+            parts = [p.strip() for p in request.headers.get("x-forwarded-for", "").split(",") if p.strip()]
+            hops = max(1, settings.trusted_proxy_hops)
+            if len(parts) >= hops:
+                try:
+                    return str(ipaddress.ip_address(parts[-hops]))
+                except ValueError:
+                    pass
+        return peer
 
     async def guard(request: Request, url: str | None = None, cost: int = 1, key=None) -> str | None:
         bucket, limit = (f"key:{key.id}", settings.api_rate_limit_per_minute) if key else (client_ip(request), settings.rate_limit_per_minute)
@@ -229,7 +241,9 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
 
     @app.get("/metrics", response_class=PlainTextResponse)
     async def prometheus(request: Request):
-        if settings.metrics_token and request.headers.get("authorization") != f"Bearer {settings.metrics_token}":
+        if settings.quotas_enabled and not settings.metrics_token:
+            raise HTTPException(404, "Not found")  # hosted mode: metrics stay off until a token is configured
+        if settings.metrics_token and not auth.safe_equal(request.headers.get("authorization"), f"Bearer {settings.metrics_token}"):
             raise HTTPException(401, "Unauthorized")
         return await metrics.render(app.state.redis)
 
@@ -414,6 +428,23 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
             "zip_url": f"/api/v1/batches/{batch.id}/zip?token={batch.token}" if done else None,
         }
 
+    async def poll_guard(request: Request, bucket: str = "poll", limit: int = 600) -> None:
+        if not await ratelimit.allow(app.state.redis, f"{bucket}:{client_ip(request)}", limit, 60):
+            raise HTTPException(429, "Too many requests, slow down")
+
+    async def require_visible(request: Request, owner_ids: set[str | None]) -> None:
+        """Jobs created while signed in (or with an API key) are visible only to their owner.
+
+        Anonymous jobs stay capability-style (knowing the unguessable id is enough). For owned jobs the status response
+        carries the download token, so it must not be handed to anyone who merely learned an id from a log or a URL.
+        """
+        owners = {o for o in owner_ids if o}
+        if not owners:
+            return
+        user, _ = await app.state.authenticate(request)
+        if user is None or user.id not in owners:
+            raise HTTPException(404, "Not found or expired")  # same answer as a missing job: ids cannot be probed
+
     async def load_batch(batch_id: str):
         batch = await app.state.batches.get(batch_id)
         if batch is None:
@@ -422,14 +453,16 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         return batch, jobs
 
     @app.get("/api/v1/batches/{batch_id}")
-    async def get_batch(batch_id: str):
+    async def get_batch(batch_id: str, request: Request):
+        await poll_guard(request)
         batch, jobs = await load_batch(batch_id)
+        await require_visible(request, {j.user_id for j in jobs})
         return batch_view(batch, jobs)
 
     @app.get("/api/v1/batches/{batch_id}/zip")
     async def batch_zip(batch_id: str, token: str = Query(...)):
         batch, jobs = await load_batch(batch_id)
-        if not secrets.compare_digest(token, batch.token):
+        if not auth.safe_equal(token, batch.token):
             raise HTTPException(403, "Invalid token")
         files = []  # (local path or None, storage key or None, filename)
         for j in jobs:
@@ -458,16 +491,21 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         return job
 
     @app.get("/api/v1/jobs/{job_id}")
-    async def get_job(job_id: str):
-        return (await load(job_id)).public()
+    async def get_job(job_id: str, request: Request):
+        await poll_guard(request)
+        job = await load(job_id)
+        await require_visible(request, {job.user_id})
+        return job.public()
 
     @app.get("/api/v1/jobs/{job_id}/events")
-    async def job_events(job_id: str):
-        await load(job_id)
+    async def job_events(job_id: str, request: Request):
+        await poll_guard(request, "sse", 30)  # opening a stream is the expensive part: it polls Redis for minutes
+        job = await load(job_id)
+        await require_visible(request, {job.user_id})
 
         async def stream():
             last = None
-            for _ in range(settings.max_duration_seconds * 2):
+            for _ in range(settings.max_duration_seconds):
                 job = await app.state.store.get(job_id)
                 if job is None:
                     break
@@ -477,7 +515,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
                     last = payload
                 if job.state in ("done", "error"):
                     break
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.0)
 
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
@@ -485,7 +523,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
     @app.get("/api/v1/jobs/{job_id}/file")
     async def job_file(job_id: str, token: str = Query(...)):
         job = await load(job_id)
-        if not secrets.compare_digest(token, job.token):
+        if not auth.safe_equal(token, job.token):
             raise HTTPException(403, "Invalid token")
         if job.state == "done" and job.storage_key and app.state.remote:
             url = await asyncio.to_thread(app.state.remote.presigned_url, job.storage_key, job.filename or "download")

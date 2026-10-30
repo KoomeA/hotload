@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     database_url: str | None = None  # default: sqlite in data_dir. Use postgresql+asyncpg://... for the hosted service
     secret_key: str = ""  # signs session cookies; set a long random value (empty = random per process)
     public_url: str | None = None  # e.g. https://hotload.example (OAuth callbacks, same-origin check)
-    cookie_secure: bool = False  # set true when served over HTTPS
+    cookie_secure: bool | None = None  # None = secure whenever public_url is https (recommended); set explicitly to override
     registration_open: bool = True
     quotas_enabled: bool = False  # self-host default: unlimited. The hosted service turns this on.
     allowed_origins: list[str] = []  # extra Origins allowed to make state-changing requests (e.g. extensions)
@@ -75,7 +75,14 @@ class Settings(BaseSettings):
     allowed_hosts: list[str] = []  # empty = any public host
     extract_timeout_seconds: int = 30
     trust_proxy_headers: bool = False  # honour X-Forwarded-For (set behind a reverse proxy)
+    trusted_proxy_hops: int = 1  # reverse proxies in front of the app; the client IP is the Nth entry from the RIGHT
     ffmpeg_location: str | None = None
+
+    @property
+    def secure_cookies(self) -> bool:
+        if self.cookie_secure is not None:
+            return self.cookie_secure
+        return (self.public_url or "").lower().startswith("https://")
 
     @property
     def db_url(self) -> str:

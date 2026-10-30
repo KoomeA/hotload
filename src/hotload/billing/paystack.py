@@ -52,7 +52,7 @@ class Paystack:
     def check_signature(self, headers: Mapping[str, str], body: bytes) -> bool:
         sent = headers.get("x-paystack-signature", "")
         expected = hmac.new(self.key.encode(), body, hashlib.sha512).hexdigest()
-        return bool(self.key) and hmac.compare_digest(sent.lower(), expected)
+        return bool(self.key) and hmac.compare_digest(sent.lower().encode("utf-8", "ignore"), expected.encode())
 
     def reference(self, body: bytes) -> tuple[str | None, str | None]:
         try:

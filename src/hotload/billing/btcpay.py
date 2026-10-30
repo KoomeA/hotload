@@ -52,7 +52,7 @@ class BTCPay:
     def check_signature(self, headers: Mapping[str, str], body: bytes) -> bool:
         sent = headers.get("btcpay-sig", "")
         expected = "sha256=" + hmac.new(self.secret.encode(), body, hashlib.sha256).hexdigest()
-        return bool(self.secret) and hmac.compare_digest(sent.lower(), expected)
+        return bool(self.secret) and hmac.compare_digest(sent.lower().encode("utf-8", "ignore"), expected.encode())
 
     def reference(self, body: bytes) -> tuple[str | None, str | None]:
         try:

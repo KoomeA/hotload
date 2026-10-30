@@ -36,13 +36,23 @@ def _email(raw: str) -> str:
 def add_account_routes(app: FastAPI, settings: Settings, client_ip) -> None:
     oauth_client = oauth.build(settings)
 
-    def set_cookie(response: Response, user_id: str) -> None:
-        response.set_cookie(auth.COOKIE, app.state.sessions.issue(user_id), max_age=auth.MAX_AGE, httponly=True,
-                            samesite="lax", secure=settings.cookie_secure, path="/")
+    def set_cookie(response: Response, user) -> None:
+        response.set_cookie(auth.COOKIE, app.state.sessions.issue(user.id, user.session_epoch), max_age=auth.MAX_AGE,
+                            httponly=True, samesite="lax", secure=settings.secure_cookies, path="/")
 
     async def current_user(request: Request):
-        uid = app.state.sessions.read(request.cookies.get(auth.COOKIE))
-        return await app.state.db.user_by_id(uid) if uid else None
+        """The signed-in user for a cookie session, or None.
+
+        A request that carries an `Authorization: Bearer hl_...` header authenticates only through that key
+        (see keys.authenticate); the cookie is deliberately ignored so a cookie can never ride along with a key.
+        """
+        if request.headers.get("authorization", "").lower().startswith("bearer hl_"):
+            return None
+        session = app.state.sessions.read(request.cookies.get(auth.COOKIE))
+        if session is None:
+            return None
+        user = await app.state.db.user_by_id(session[0])
+        return user if user is not None and user.session_epoch == session[1] else None  # a bumped epoch revokes it
     app.state.current_user = current_user
 
     async def require_user(request: Request):
@@ -75,23 +85,36 @@ def add_account_routes(app: FastAPI, settings: Settings, client_ip) -> None:
             user = await app.state.db.add_user(email=email, password_hash=auth.hash_password(body.password))
         except IntegrityError:
             raise HTTPException(409, "An account with this email already exists") from None
-        set_cookie(response, user.id)
+        set_cookie(response, user)
         return view(user)
 
     @app.post("/api/v1/auth/login")
     async def login(body: Credentials, request: Request, response: Response):
-        email = body.email.strip().lower()
-        ok_rate = await ratelimit.allow(app.state.redis, f"login:{client_ip(request)}:{email}", 10, 900)
-        if not ok_rate:
-            raise HTTPException(429, "Too many attempts, try again in a few minutes")
+        try:
+            email = _email(body.email)  # the same normalisation as registration, or some users could never sign in
+        except HTTPException:
+            email = body.email.strip().lower()
+        ip = client_ip(request)
+        # Three layers: one address+account pair, one address across all accounts (credential stuffing), and one account
+        # from anywhere (a distributed guess). The per-account cap is generous so it cannot be used to lock a victim out.
+        for bucket, limit, window in ((f"login:{ip}:{email}", 10, 900), (f"loginip:{ip}", 40, 900), (f"loginacct:{email}", 60, 3600)):
+            if not await ratelimit.allow(app.state.redis, bucket, limit, window):
+                raise HTTPException(429, "Too many attempts, try again in a few minutes")
         user = await app.state.db.user_by_email(email)
         if not auth.verify_password(user.password_hash if user else None, body.password) or user is None:
             raise HTTPException(401, "Incorrect email or password")  # same message for unknown email
-        set_cookie(response, user.id)
+        set_cookie(response, user)
         return view(user)
 
     @app.post("/api/v1/auth/logout", status_code=204)
     async def logout(response: Response):
+        response.delete_cookie(auth.COOKIE, path="/")
+
+    @app.post("/api/v1/auth/logout-all", status_code=204)
+    async def logout_all(request: Request, response: Response):
+        """Sign out everywhere: every session issued so far stops working (e.g. a copied cookie)."""
+        user = await require_user(request)
+        await app.state.db.bump_epoch(user.id)
         response.delete_cookie(auth.COOKIE, path="/")
 
     @app.get("/api/v1/me")
@@ -104,8 +127,12 @@ def add_account_routes(app: FastAPI, settings: Settings, client_ip) -> None:
     @app.delete("/api/v1/me", status_code=204)
     async def delete_me(body: DeleteAccount, request: Request, response: Response):
         user = await require_user(request)
-        if user.password_hash and not auth.verify_password(user.password_hash, body.password or ""):
-            raise HTTPException(403, "Password is incorrect")
+        if user.password_hash:
+            # Password checks here are as guessable as login, so they share a limit (a stolen cookie must not be an oracle).
+            if not await ratelimit.allow(app.state.redis, f"pwcheck:{user.id}", 10, 900):
+                raise HTTPException(429, "Too many attempts, try again in a few minutes")
+            if not auth.verify_password(user.password_hash, body.password or ""):
+                raise HTTPException(403, "Password is incorrect")
         await app.state.db.delete_user(user.id)
         response.delete_cookie(auth.COOKIE, path="/")
 
@@ -148,7 +175,12 @@ def add_account_routes(app: FastAPI, settings: Settings, client_ip) -> None:
         user = await db.user_by_oauth(provider, profile.sub)
         if user is None:
             existing = await db.user_by_email(profile.email)  # linking is safe: the provider verified this email
-            if existing:
+            if existing and existing.password_hash:
+                # Pre-hijack defence: someone else may have registered this address with a password they know.
+                await db.take_over_for_oauth(existing.id, provider, profile.sub)
+                user = await db.user_by_id(existing.id)
+                log(logger, "oauth took over a password account", logging.WARNING, user=existing.id, provider=provider)
+            elif existing:
                 await db.link_oauth(existing.id, provider, profile.sub)
                 user = existing
             elif not settings.registration_open:
@@ -156,7 +188,7 @@ def add_account_routes(app: FastAPI, settings: Settings, client_ip) -> None:
             else:
                 user = await db.add_user(email=profile.email, oauth_provider=provider, oauth_sub=profile.sub)
         response = RedirectResponse("/", status_code=303)
-        set_cookie(response, user.id)
+        set_cookie(response, user)
         return response
 
 
