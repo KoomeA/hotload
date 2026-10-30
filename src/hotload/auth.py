@@ -40,3 +40,33 @@ class Sessions:
             return self.signer.loads(token, max_age=MAX_AGE).get("uid")
         except BadSignature:
             return None
+
+
+# --- API keys ---------------------------------------------------------------------------------------------
+# Format: hl_<id>_<secret>. The id is public (lookup); only a SHA-256 of the secret is stored. The secret has 256
+# bits of entropy, so a fast hash is appropriate here (unlike passwords).
+
+import hashlib  # noqa: E402
+import hmac  # noqa: E402
+
+
+def new_api_key() -> tuple[str, str, str, str]:
+    """Return (full key shown once, key id, secret hash, webhook signing secret)."""
+    key_id = secrets.token_hex(6)
+    secret = secrets.token_urlsafe(32)
+    return f"hl_{key_id}_{secret}", key_id, hash_secret(secret), secrets.token_urlsafe(32)
+
+
+def hash_secret(secret: str) -> str:
+    return hashlib.sha256(secret.encode()).hexdigest()
+
+
+def parse_api_key(token: str) -> tuple[str, str] | None:
+    parts = token.split("_", 2)
+    if len(parts) != 3 or parts[0] != "hl" or not parts[1] or not parts[2]:
+        return None
+    return parts[1], parts[2]
+
+
+def key_matches(stored_hash: str, secret: str) -> bool:
+    return hmac.compare_digest(stored_hash, hash_secret(secret))

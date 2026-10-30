@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     btcpay_store_id: str | None = None
     btcpay_api_key: str | None = None
     btcpay_webhook_secret: str | None = None
+    api_rate_limit_per_minute: int = 120  # per API key
+    webhook_timeout_seconds: int = 10
+    webhook_max_attempts: int = 5
     redis_url: str = "redis://localhost:6379/0"
     data_dir: Path = Path("data")
     file_ttl_seconds: int = 3600

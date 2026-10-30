@@ -6,10 +6,11 @@ import re
 import time
 from functools import partial
 
-from arq import cron
+import httpx
+from arq import Retry, cron
 from arq.connections import RedisSettings
 
-from . import canary, engine, logging_setup, metrics, storage
+from . import canary, engine, logging_setup, metrics, storage, webhooks
 from .config import get_settings
 from .db import Database
 from .jobs import JobStore
@@ -111,6 +112,9 @@ async def run_download(ctx: dict, job_id: str) -> None:
         except Exception:  # noqa: BLE001 - history is best-effort; never fail a finished download over it
             logger.exception("history update failed", extra={"ctx": {"job": job.id}})
 
+    if job.webhook_url and job.key_id:
+        await ctx["redis"].enqueue_job("deliver_webhook", job.id)
+
     elapsed = time.monotonic() - started
     await metrics.inc(redis, "hotload_jobs_total", state=job.state, preset=job.preset, adult=str(job.adult).lower())
     await metrics.observe(redis, "hotload_job_seconds", elapsed, state=job.state)
@@ -118,6 +122,27 @@ async def run_download(ctx: dict, job_id: str) -> None:
         await metrics.inc(redis, "hotload_job_errors_total", retryable=str(bool(error and error.retryable)).lower())
     log(logger, "job finished", job=job.id, url=url_ref(job.url), state=job.state, seconds=round(elapsed, 2),
         attempts=attempts, adult=job.adult)
+
+
+async def deliver_webhook(ctx: dict, job_id: str) -> None:
+    """Send the signed job.finished webhook, retrying with backoff on network errors, 5xx and 429."""
+    settings = get_settings()
+    job = await ctx["store"].get(job_id)
+    if job is None or not job.webhook_url or not job.key_id:
+        return
+    key = await ctx["db"].get_key(job.key_id)
+    if key is None or key.revoked:
+        return  # a revoked key must stop receiving data
+    body, headers = webhooks.build(job.public(), key.webhook_secret)
+    try:
+        await webhooks.deliver(job.webhook_url, body, headers, settings, ctx["http"])
+        await metrics.inc(ctx["store"].redis, "hotload_webhooks_total", result="ok")
+    except webhooks.WebhookError as exc:
+        attempt = ctx.get("job_try", 1)
+        log(logger, "webhook delivery failed", logging.WARNING, job=job_id, attempt=attempt, error=str(exc))
+        if exc.retryable and attempt < settings.webhook_max_attempts:
+            raise Retry(defer=min(30 * 4 ** (attempt - 1), 3600)) from exc  # 30s, 2m, 8m, 32m
+        await metrics.inc(ctx["store"].redis, "hotload_webhooks_total", result="failed")
 
 
 async def cleanup(ctx: dict) -> None:
@@ -142,17 +167,19 @@ async def startup(ctx: dict) -> None:
     ctx["redis_client"] = Redis.from_url(s.redis_url, decode_responses=True)
     ctx["store"] = JobStore(ctx["redis_client"], s.job_ttl_seconds)
     s.data_dir.mkdir(parents=True, exist_ok=True)
+    ctx["http"] = httpx.AsyncClient()
     ctx["db"] = Database(s)
     await ctx["db"].migrate()
 
 
 async def shutdown(ctx: dict) -> None:
+    await ctx["http"].aclose()
     await ctx["db"].dispose()
     await ctx["redis_client"].aclose()
 
 
 class WorkerSettings:
-    functions = [run_download]
+    functions = [run_download, deliver_webhook]
     cron_jobs = [
         cron(cleanup, minute={0, 10, 20, 30, 40, 50}),
         cron(run_canaries, minute={5, 20, 35, 50}, run_at_startup=True, timeout=600),

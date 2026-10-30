@@ -34,12 +34,14 @@ class Job:
     site: str | None = None
     user_id: str | None = None
     batch_id: str | None = None
+    key_id: str | None = None
+    webhook_url: str | None = None
     created: float = field(default_factory=time.time)
     token: str = field(default_factory=lambda: secrets.token_urlsafe(24))
 
     def public(self) -> dict:
         d = asdict(self)
-        for hidden in ("path", "token", "url", "age_confirmed", "user_id", "max_duration"):
+        for hidden in ("path", "token", "url", "age_confirmed", "user_id", "max_duration", "key_id", "webhook_url"):
             d.pop(hidden)
         d["download_url"] = f"/api/v1/jobs/{self.id}/file?token={self.token}" if self.state == "done" else None
         return d

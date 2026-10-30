@@ -21,9 +21,7 @@ def _is_public_ip(ip: str) -> bool:
     return addr.is_global and not addr.is_multicast
 
 
-def validate_url(
-    url: str, settings: Settings, resolve=socket.getaddrinfo, enforce_allowlist: bool = True
-) -> str:
+def validate_url(url: str, settings: Settings, resolve=None, enforce_allowlist: bool = True) -> str:
     """Return a normalised URL or raise UnsafeURL. `resolve` is injectable for tests.
 
     `enforce_allowlist=False` is used for outbound requests made *while processing* an allowed URL
@@ -41,6 +39,7 @@ def validate_url(
         raise UnsafeURL("This site is blocked")
     if enforce_allowlist and settings.allowed_hosts and not _host_matches(host, settings.allowed_hosts):
         raise UnsafeURL("This site is not allowed")
+    resolve = resolve or socket.getaddrinfo  # looked up at call time, so tests can substitute a resolver
     try:
         literal = ipaddress.ip_address(host)
     except ValueError:

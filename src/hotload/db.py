@@ -258,6 +258,35 @@ class Database:
             user.tier, user.tier_expires = tier, expires
             await s.commit()
 
+    # --- API keys
+    async def create_key(self, user_id: str, name: str, key_hash: str, webhook_secret: str, key_id: str) -> ApiKey:
+        async with self.session() as s:
+            key = ApiKey(id=key_id, user_id=user_id, name=name, key_hash=key_hash, webhook_secret=webhook_secret)
+            s.add(key)
+            await s.commit()
+            return key
+
+    async def get_key(self, key_id: str) -> ApiKey | None:
+        async with self.session() as s:
+            return await s.get(ApiKey, key_id)
+
+    async def list_keys(self, user_id: str) -> list[ApiKey]:
+        async with self.session() as s:
+            q = select(ApiKey).where(ApiKey.user_id == user_id, ApiKey.revoked.is_(False)).order_by(ApiKey.created)
+            return list((await s.execute(q)).scalars())
+
+    async def revoke_key(self, user_id: str, key_id: str) -> bool:
+        async with self.session() as s:
+            res = await s.execute(update(ApiKey).where(ApiKey.id == key_id, ApiKey.user_id == user_id,
+                                                       ApiKey.revoked.is_(False)).values(revoked=True))
+            await s.commit()
+            return res.rowcount == 1
+
+    async def touch_key(self, key_id: str, now: float) -> None:
+        async with self.session() as s:
+            await s.execute(update(ApiKey).where(ApiKey.id == key_id).values(last_used=now))
+            await s.commit()
+
     # --- history
     async def add_history(self, user_id: str, job) -> None:
         async with self.session() as s:

@@ -24,6 +24,7 @@ from ..jobs import BatchStore, JobStore
 from ..proxies import NoProxyAvailable, ProxyPool
 from .accounts import add_account_routes, origin_allowed
 from .billing import add_billing_routes
+from .keys import add_key_routes, record_usage
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -42,6 +43,7 @@ class JobOptions(BaseModel):
     subtitle_auto: bool = False
     audio_lang: str | None = None
     age_confirmed: bool = False
+    webhook_url: str | None = Field(default=None, max_length=2048)  # API keys only: signed POST when the job finishes
 
     @model_validator(mode="after")
     def _check(self):
@@ -127,8 +129,9 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
                 return fwd.split(",")[0].strip()
         return request.client.host if request.client else "unknown"
 
-    async def guard(request: Request, url: str | None = None, cost: int = 1) -> str | None:
-        if not await ratelimit.allow(app.state.redis, client_ip(request), settings.rate_limit_per_minute, cost=cost):
+    async def guard(request: Request, url: str | None = None, cost: int = 1, key=None) -> str | None:
+        bucket, limit = (f"key:{key.id}", settings.api_rate_limit_per_minute) if key else (client_ip(request), settings.rate_limit_per_minute)
+        if not await ratelimit.allow(app.state.redis, bucket, limit, cost=cost):
             raise HTTPException(429, "Too many requests, slow down")
         if url is None:
             return None
@@ -186,7 +189,8 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
 
     @app.post("/api/v1/extract")
     async def extract(body: ExtractRequest, request: Request):
-        url = await guard(request, body.url)
+        _, _, key = await who(request)
+        url = await guard(request, body.url, key=key)
         try:
             info = await asyncio.to_thread(extract_with_retries, url)
         except engine.EngineError as exc:
@@ -198,8 +202,8 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         return info
 
     async def who(request: Request):
-        user = await app.state.current_user(request)
-        return user, tiers.tier_for(user)
+        user, key = await app.state.authenticate(request)
+        return user, tiers.tier_for(user), key
 
     def precheck(url: str, o: JobOptions, tier: tiers.Tier) -> bool:
         """Validate options for one URL against the preset, age gate and plan. Returns whether it is adult."""
@@ -222,31 +226,47 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
                 app.state.redis, tiers.subject(user, client_ip(request)), tier, cost):
             raise HTTPException(429, f"Daily limit reached for your plan ({tier.jobs_per_window} downloads per 12 hours)")
 
-    async def new_job(url: str, o: JobOptions, adult: bool, user, tier: tiers.Tier, batch_id: str | None = None):
+    async def check_webhook(o: JobOptions, key) -> str | None:
+        if not o.webhook_url:
+            return None
+        if key is None:
+            raise HTTPException(400, "Webhooks need an API key")
+        if not o.webhook_url.lower().startswith("https://") and not settings.allow_private_targets:
+            raise HTTPException(400, "Webhook URLs must use https")  # the payload carries a download token
+        try:
+            return await asyncio.to_thread(security.validate_url, o.webhook_url, settings)
+        except security.UnsafeURL as exc:
+            raise HTTPException(400, f"Webhook URL: {exc}") from exc
+
+    async def new_job(url: str, o: JobOptions, adult: bool, user, tier: tiers.Tier, batch_id: str | None = None,
+                      key=None, webhook_url: str | None = None):
         job = await app.state.store.create(
             url=url, preset=o.preset, start=o.start, end=o.end, subtitle_langs=o.subtitle_langs,
             subtitle_format=o.subtitle_format, subtitle_mode=o.subtitle_mode, subtitle_auto=o.subtitle_auto,
             audio_lang=o.audio_lang, adult=adult, age_confirmed=o.age_confirmed, batch_id=batch_id,
-            user_id=user.id if user else None,
+            user_id=user.id if user else None, key_id=key.id if key else None, webhook_url=webhook_url,
             max_duration=tier.max_duration if settings.quotas_enabled else None,
         )
         if user:
             await app.state.db.add_history(user.id, job)
+            await record_usage(app.state.redis, user.id, key.id if key else None, "jobs")
         return job
 
     @app.post("/api/v1/jobs", status_code=202)
     async def create_job(body: JobRequest, request: Request):
-        url = await guard(request, body.url)
-        user, tier = await who(request)
+        user, tier, key = await who(request)
+        url = await guard(request, body.url, key=key)
+        hook = await check_webhook(body, key)
         adult = precheck(url, body, tier)
         await spend_quota(request, user, tier, 1)
-        job = await new_job(url, body, adult, user, tier)
+        job = await new_job(url, body, adult, user, tier, key=key, webhook_url=hook)
         await app.state.enqueue(job.id)
         return job.public()
 
     @app.post("/api/v1/playlist")
     async def playlist(body: PlaylistRequest, request: Request):
-        url = await guard(request, body.url)
+        _, _, key = await who(request)
+        url = await guard(request, body.url, key=key)
         try:
             data = await asyncio.to_thread(
                 lambda: engine.extract_playlist(url, settings, app.state.pool.select(url), settings.max_playlist_entries))
@@ -267,11 +287,12 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
 
     @app.post("/api/v1/batches", status_code=202)
     async def create_batch(body: BatchRequest, request: Request):
-        user, tier = await who(request)
+        user, tier, key = await who(request)
         limit = min(settings.max_batch_size, tier.batch_size) if settings.quotas_enabled else settings.max_batch_size
         if len(body.urls) > limit:
             raise HTTPException(400, f"Your plan allows up to {limit} links per batch")
-        await guard(request, cost=len(body.urls))
+        await guard(request, cost=len(body.urls), key=key)
+        hook = await check_webhook(body, key)
         urls = []
         for raw in dict.fromkeys(u.strip() for u in body.urls if u.strip()):
             try:
@@ -280,7 +301,8 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
                 raise HTTPException(400, f"{raw[:80]}: {exc}") from exc
         adults = [precheck(u, body, tier) for u in urls]
         await spend_quota(request, user, tier, len(urls))
-        jobs = [await new_job(u, body, adult, user, tier) for u, adult in zip(urls, adults, strict=True)]
+        jobs = [await new_job(u, body, adult, user, tier, key=key, webhook_url=hook)
+                for u, adult in zip(urls, adults, strict=True)]
         batch = await app.state.batches.create([j.id for j in jobs])
         for j in jobs:
             j.batch_id = batch.id
@@ -367,6 +389,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
 
     add_account_routes(app, settings, client_ip)
     add_billing_routes(app, settings, client_ip)
+    add_key_routes(app, settings)
 
     web_dir = settings.web_dir or WEB_DIR
     if web_dir.exists():
