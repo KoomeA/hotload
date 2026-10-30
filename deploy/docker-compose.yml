@@ -1,0 +1,24 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+  api:
+    build: ..
+    env_file: ../.env
+    ports: ["8000:8000"]
+    volumes: ["media:/data"]
+    depends_on: [redis]
+    restart: unless-stopped
+  worker:
+    build: ..
+    command: ["arq", "hotload.worker.WorkerSettings"]
+    env_file: ../.env
+    volumes: ["media:/data"]
+    depends_on: [redis]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+volumes:
+  media:
