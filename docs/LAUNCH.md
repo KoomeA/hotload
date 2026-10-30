@@ -55,7 +55,7 @@ Things that **only you / a staging environment can verify**. I could not do them
 
 **Product gaps to decide on**
 - [ ] **Email**: set the `HOTLOAD_SMTP_*` variables and `HOTLOAD_MAIL_FROM` (code is built and tested against a local sink; docs/ACCOUNTS.md), send a real test message, set SPF/DKIM/DMARC, then consider `HOTLOAD_REQUIRE_VERIFIED_EMAIL=true`.
-- [ ] Refund/chargeback handling is manual (held payments, provider dashboards). Decide who does it and how fast.
+- [ ] Refunds and chargebacks are built (docs/PAYMENTS.md section 5) but need an owner: who watches `payment DISPUTED` / `dispute RESOLVED` alerts and the console's decision list, and within what time. Confirm Paystack's refund/dispute events in test mode.
 - [ ] Native-speaker review of the es/fr/de/pt/sw translations.
 
 ## 3. Hosted configuration (minimum)

@@ -1,4 +1,4 @@
-// Email verification and password reset, in a real browser, against a throwaway API instance whose mail goes to a local
+// Email verification, password reset and the admin payments console (held, disputed, refund), in a real browser, against a throwaway API instance whose mail goes to a local
 // SMTP sink, and a private redis-server on port 6390. Needs redis-server and the Python venv. Usage:
 //   HL_BIN=/path/to/venv/bin node e2e/m5.mjs      (HL_BIN defaults to ../.venv/bin)
 import { execFileSync, spawn } from 'node:child_process';
@@ -147,6 +147,65 @@ await step('a used link shows a readable error in the page', async () => {
   await fresh.getByRole('button', { name: 'Save new password' }).click();
   await fresh.getByText('This link is invalid or has expired').waitFor({ timeout: 15000 });
   await fresh.close();
+});
+
+// --- admin console: payments that need a decision
+const py = (code) => execFileSync(path.join(HL_BIN, 'python'), ['-c', code], { env: { ...process.env, HOTLOAD_DATA_DIR: data } }).toString();
+const post = (p, body) => fetch(`${BASE}${p}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+const seed = async () => {
+  for (const e of ['buyer1@example.com', 'buyer2@example.com', 'boss@example.com']) ok((await post('/api/v1/auth/register', { email: e, password: OLD })).status === 201, `register ${e}`);
+  py(`
+import asyncio
+from hotload.config import Settings
+from hotload.db import Database
+async def pay(db, email, plan):
+    u = await db.user_by_email(email)
+    p = await db.create_payment(user_id=u.id, provider='paystack', plan=plan, amount_minor=999, currency='USD')
+    return p, await db.complete_payment(p.id)
+async def main():
+    db = Database(Settings())
+    p, out = await pay(db, 'buyer1@example.com', 'premium_30'); assert out == 'granted'
+    await db.reverse_payment(p.id, 'dispute', 'provider:paystack', 'opened by bank')
+    _, out = await pay(db, 'buyer2@example.com', 'pro_30'); assert out == 'granted'
+    _, out = await pay(db, 'buyer2@example.com', 'premium_30'); assert out == 'held', out
+    await db.dispose()
+asyncio.run(main())
+`);
+  execFileSync(path.join(HL_BIN, 'python'), ['-m', 'hotload.admin', 'grant', 'boss@example.com'], { env: { ...process.env, HOTLOAD_DATA_DIR: data } });
+};
+const tierOf = async (email) => {
+  const r = await post('/api/v1/auth/login', { email, password: OLD });
+  const cookie = r.headers.get('set-cookie').split(';')[0];
+  return (await (await fetch(`${BASE}/api/v1/me`, { headers: { cookie } })).json()).tier;
+};
+
+await step('admin console lists the disputed and the held payment and counts them in the overview', async () => {
+  await seed();
+  ok((await tierOf('buyer1@example.com')) === 'free', 'a disputed plan should be suspended');
+  await page.context().clearCookies();
+  await ready(`${BASE}/account/`);
+  await page.getByLabel('Email').fill('boss@example.com');
+  await page.getByLabel('Password').fill(OLD);
+  await page.getByRole('button', { name: 'Sign in' }).last().click();
+  await page.getByText('boss@example.com').first().waitFor({ timeout: 15000 });
+  await page.goto(`${BASE}/admin/`);
+  await page.getByRole('heading', { name: 'Payments needing a decision' }).waitFor({ timeout: 15000 });
+  await page.getByText('buyer1@example.com').first().waitFor();
+  await page.getByText('buyer2@example.com').first().waitFor();
+  await page.getByText('1 held, 1 disputed payments').waitFor();
+});
+
+await step('winning a dispute restores the plan; refunding the held payment closes it without touching the Pro plan', async () => {
+  const rowOf = (email) => page.locator('article.report', { hasText: email });
+  await rowOf('buyer1@example.com').getByRole('button', { name: 'Dispute won: restore plan' }).click();
+  await page.getByText(/dispute won: paid \(plan: granted\)/).waitFor({ timeout: 15000 });
+  await rowOf('buyer2@example.com').getByLabel('Refund through Paystack').uncheck(); // no live Paystack here: record only
+  page.once('dialog', (d) => d.accept());
+  await rowOf('buyer2@example.com').getByRole('button', { name: 'Refund', exact: true }).click();
+  await page.getByText(/refund: refunded/).waitFor({ timeout: 15000 });
+  await page.getByText('Nothing needs a decision.').waitFor({ timeout: 15000 });
+  ok((await tierOf('buyer1@example.com')) === 'premium', 'the plan did not come back');
+  ok((await tierOf('buyer2@example.com')) === 'pro', 'refunding the held payment changed the Pro plan');
 });
 
 await browser.close();

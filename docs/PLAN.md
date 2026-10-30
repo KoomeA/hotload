@@ -64,8 +64,9 @@ Code layout (`src/hotload`):
 - [x] Abuse tooling: public reports, admin blocklist/takedown (host, URL, media id), manual plan grants.
 - [x] S3/R2 storage backend and priority queues.
 - [ ] Not live-tested: Paystack and BTCPay (tests use faithful fakes), S3 (tests use moto), priority pools under load.
-- [ ] Still open: adult-friendly card processor module (CCBill/Segpay/Verotel after quotes), refunds/chargeback handling,
-  invoices/receipts by email (needs mail provider), tax (VAT) handling, queue-depth metric, autoscaling rules.
+- [x] Refunds, disputes and chargebacks: audited state machine, admin console, Paystack refund API and signed webhooks (docs/PAYMENTS.md section 5; not run against Paystack).
+- [ ] Still open: adult-friendly card processor module (CCBill/Segpay/Verotel after quotes), partial refunds,
+  receipts/refund emails to customers, tax (VAT) handling, queue-depth metric, autoscaling rules.
 
 ### M4: Differentiators - implemented (see docs/COOKIES.md, docs/BOTS.md, extension/README.md)
 - [x] SponsorBlock (mark/remove), live-stream recording (FFmpeg-capped, plan-limited), encrypted saved cookies.

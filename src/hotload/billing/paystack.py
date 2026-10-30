@@ -67,6 +67,24 @@ class Paystack:
         ref = (event.get("data") or {}).get("reference")
         return (ref if isinstance(ref, str) else None), None
 
+    async def refund(self, payment) -> str:
+        """Full refund through Paystack's refund API. Unconfirmed against live documentation (see docs/PAYMENTS.md)."""
+        data = await self._call("POST", "/refund", json={"transaction": payment.id})
+        ref = data.get("id") or data.get("reference") or data.get("transaction_reference") or ""
+        return str(ref)[:64]
+
+    def reversal(self, body: bytes) -> tuple[str, str] | None:
+        try:
+            event = json.loads(body)
+        except ValueError:
+            return None
+        kind = {"refund.processed": "refund", "charge.dispute.create": "dispute_opened",
+                "charge.dispute.resolve": "dispute_resolved"}.get(str(event.get("event")))
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        txn = data.get("transaction") if isinstance(data.get("transaction"), dict) else {}
+        ref = data.get("transaction_reference") or txn.get("reference")  # where each event carries our reference
+        return (kind, ref) if kind and isinstance(ref, str) and ref else None
+
     async def verify(self, payment) -> Verified:
         data = await self._call("GET", f"/transaction/verify/{payment.id}")
         status = {"success": "paid", "failed": "failed", "reversed": "failed"}.get(str(data.get("status")), "pending")

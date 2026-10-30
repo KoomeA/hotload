@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .. import blocklist, ratelimit, tiers
+from ..billing.service import CheckoutRefused
 from ..blocklist import Blocklist
 from ..config import Settings
 from ..logging_setup import log
@@ -39,6 +40,11 @@ class TierIn(BaseModel):
     email: str = Field(max_length=320)
     tier: Literal["free", "premium", "pro"]
     days: int | None = Field(default=None, ge=1, le=3660)  # None = no expiry
+
+
+class PaymentAction(BaseModel):
+    note: str = Field(default="", max_length=250)
+    through_provider: bool = False  # refund only: have the provider move the money (needs API support)
 
 
 class RuleCache:
@@ -135,6 +141,64 @@ def add_admin_routes(app: FastAPI, settings: Settings, client_ip) -> None:
             raise HTTPException(404, "Report not found")
         log(logger, "report resolved", admin=admin.id, report=report_id, status=body.status, blocked=bool(body.block))
         return result
+
+    # --- payments that need a human: held (paid but not granted), disputed, and the refund/chargeback actions
+    @app.get("/api/v1/admin/payments")
+    async def payments_to_review(request: Request, status: str = "held,disputed"):
+        await require_admin(request)
+        wanted = tuple(x for x in status.split(",") if x in ("held", "disputed", "refunded", "chargedback", "paid"))
+        return await app.state.db.payments_needing_attention(wanted or ("held", "disputed"))
+
+    @app.get("/api/v1/admin/payments/{payment_id}")
+    async def payment_detail(payment_id: str, request: Request):
+        await require_admin(request)
+        payment = await app.state.db.get_payment(payment_id)
+        if payment is None:
+            raise HTTPException(404, "Payment not found")
+        user = await app.state.db.user_by_id(payment.user_id)
+        return {**payment.public(), "email": user.email if user else None, "events": await app.state.db.payment_events(payment_id)}
+
+    async def act(request: Request, payment_id: str, action: str, body: PaymentAction):
+        admin = await require_admin(request)
+        service = app.state.billing
+        payment = await app.state.db.get_payment(payment_id)
+        if payment is None:
+            raise HTTPException(404, "Payment not found")
+        # One action at a time per payment: two clicks must not ask the provider to refund twice.
+        lock = f"paylock:{payment_id}"
+        if not await app.state.redis.set(lock, "1", nx=True, ex=60):
+            raise HTTPException(409, "Another action on this payment is in progress")
+        try:
+            if action == "refund":
+                try:
+                    result = await service.refund(payment, admin.id, body.note, body.through_provider)
+                except CheckoutRefused as exc:
+                    raise HTTPException(exc.status, str(exc)) from exc
+            else:
+                result = await service.reverse(payment_id, action, admin.id, body.note)
+        finally:
+            await app.state.redis.delete(lock)
+        if not result["ok"]:
+            raise HTTPException(409, result.get("error") or "Not allowed")
+        log(logger, "payment action", admin=admin.id, payment=payment_id, action=action, status=result["status"],
+            entitlement=result["entitlement"])
+        return result
+
+    @app.post("/api/v1/admin/payments/{payment_id}/refund")
+    async def refund_payment(payment_id: str, body: PaymentAction, request: Request):
+        return await act(request, payment_id, "refund", body)
+
+    @app.post("/api/v1/admin/payments/{payment_id}/dispute")
+    async def dispute_payment(payment_id: str, body: PaymentAction, request: Request):
+        return await act(request, payment_id, "dispute", body)
+
+    @app.post("/api/v1/admin/payments/{payment_id}/dispute-won")
+    async def dispute_won(payment_id: str, body: PaymentAction, request: Request):
+        return await act(request, payment_id, "dispute_won", body)
+
+    @app.post("/api/v1/admin/payments/{payment_id}/chargeback")
+    async def chargeback(payment_id: str, body: PaymentAction, request: Request):
+        return await act(request, payment_id, "chargeback", body)
 
     @app.post("/api/v1/admin/users/tier")
     async def grant_tier(body: TierIn, request: Request):

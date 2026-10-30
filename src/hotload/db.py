@@ -84,7 +84,8 @@ class Payment(Base):
     plan: Mapped[str] = mapped_column(String(24))
     amount_minor: Mapped[int] = mapped_column(Integer)
     currency: Mapped[str] = mapped_column(String(3))
-    status: Mapped[str] = mapped_column(String(10), default="pending")  # pending | paid | failed | expired
+    # pending | paid | failed | expired | held | refunded | disputed | chargedback (see PAYMENT_SETTLED)
+    status: Mapped[str] = mapped_column(String(12), default="pending")
     provider_ref: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     created: Mapped[float] = mapped_column(Float, default=time.time)
     paid_at: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -92,6 +93,30 @@ class Payment(Base):
     def public(self) -> dict:
         return {"id": self.id, "provider": self.provider, "plan": self.plan, "amount_minor": self.amount_minor,
                 "currency": self.currency, "status": self.status, "created": self.created, "paid_at": self.paid_at}
+
+
+# Statuses in which the money has been dealt with (or is being): the provider's "paid" answer must never grant again.
+PAYMENT_SETTLED = frozenset({"paid", "held", "refunded", "disputed", "chargedback"})
+
+
+class PaymentEvent(Base):
+    """Append-only audit trail of what happened to a payment after it was paid (who, what, why)."""
+
+    __tablename__ = "payment_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    payment_id: Mapped[str] = mapped_column(String(32), index=True)
+    at: Mapped[float] = mapped_column(Float, default=time.time)
+    kind: Mapped[str] = mapped_column(String(24))  # refund | dispute | dispute_won | dispute_resolved | chargeback
+    actor: Mapped[str] = mapped_column(String(64))  # an admin's user id, or "provider:<name>"
+    from_status: Mapped[str] = mapped_column(String(12))
+    to_status: Mapped[str] = mapped_column(String(12))
+    entitlement: Mapped[str] = mapped_column(String(32), default="none")  # what happened to the user's plan
+    note: Mapped[str] = mapped_column(String(300), default="")
+
+    def public(self) -> dict:
+        return {"at": self.at, "kind": self.kind, "actor": self.actor, "from": self.from_status, "to": self.to_status,
+                "entitlement": self.entitlement, "note": self.note}
 
 
 class ApiKey(Base):
@@ -316,7 +341,7 @@ class Database:
         now = now or time.time()
         async with self.session() as s, s.begin():
             payment = await s.get(Payment, payment_id)
-            if payment is None or payment.status in ("paid", "held"):
+            if payment is None or payment.status in PAYMENT_SETTLED:
                 return "noop"
             was = payment.status
             user = (await s.execute(select(User).where(User.id == payment.user_id).with_for_update())).scalar_one_or_none()
@@ -333,6 +358,93 @@ class Database:
                 return "held"
             user.tier, user.tier_expires = entitlement_after(user.tier, user.tier_expires, plan, now)
             return "granted"
+
+    # transition table for payments that were already paid: action -> (allowed current statuses, new status)
+    _REVERSALS = {
+        "refund": ({"paid", "held", "disputed"}, "refunded"),
+        "dispute": ({"paid"}, "disputed"),
+        "dispute_won": ({"disputed"}, "paid"),
+        "chargeback": ({"paid", "disputed"}, "chargedback"),
+    }
+
+    async def reverse_payment(self, payment_id: str, action: str, actor: str, note: str = "",
+                              now: float | None = None) -> dict:
+        """Refund, dispute, win a dispute, or lose one (chargeback). One transaction, compare-and-set on the status.
+
+        Entitlement follows the money, using the same arithmetic the grant used (see billing.catalog.entitlement_after):
+        - refund/chargeback of a payment that is currently granting time: the plan's days come off the expiry; if nothing
+          is left the account drops to free. A payment that was `held` or already `disputed` granted nothing (or its time
+          was already taken back), so no further change is made.
+        - dispute: the same days are taken back at once (a customer who may be taking the money back keeps no access).
+        - dispute won: the plan is granted again from now, exactly as a fresh payment would be (or held, if the user now
+          has a higher plan).
+        - the user already has a *higher* plan than this payment bought: their access is left alone and the result says
+          so ("skipped_higher_plan"), because the higher plan's days cannot be attributed to this payment.
+        Repeating an action that has already happened is a no-op, so retried webhooks and double clicks are harmless.
+
+        Returns {"ok", "status", "changed", "entitlement", "error"?}.
+        """
+        from .billing.catalog import PLANS, TIER_RANK, entitlement_after
+
+        allowed, target = self._REVERSALS[action]
+        now = now or time.time()
+        async with self.session() as s, s.begin():
+            payment = await s.get(Payment, payment_id)
+            if payment is None:
+                return {"ok": False, "status": None, "changed": False, "entitlement": "none", "error": "Payment not found"}
+            if payment.status == target:
+                return {"ok": True, "status": target, "changed": False, "entitlement": "none"}
+            if payment.status not in allowed:
+                return {"ok": False, "status": payment.status, "changed": False, "entitlement": "none",
+                        "error": f"A {payment.status} payment cannot be {action.replace('_', ' ')}d"}
+            was = payment.status
+            user = (await s.execute(select(User).where(User.id == payment.user_id).with_for_update())).scalar_one_or_none()
+            plan = PLANS[payment.plan]
+            active = (user is not None and user.tier not in ("free", "anonymous")
+                      and (user.tier_expires is None or user.tier_expires > now))
+            entitlement = "none"
+            if action == "dispute_won":
+                if user is None or (active and TIER_RANK[user.tier] > TIER_RANK[plan.tier]):
+                    target, entitlement = "held", "held"  # nothing to give it to, or it would undercut a higher plan
+                else:
+                    user.tier, user.tier_expires = entitlement_after(user.tier, user.tier_expires, plan, now)
+                    entitlement = "granted"
+            elif was == "paid" and user is not None:
+                if TIER_RANK.get(user.tier, 0) > TIER_RANK[plan.tier] and active:
+                    entitlement = "skipped_higher_plan"
+                elif user.tier == plan.tier and user.tier_expires is not None:
+                    left = user.tier_expires - plan.days * 86400
+                    if left > now:
+                        user.tier_expires, entitlement = left, "shortened"
+                    else:
+                        user.tier, user.tier_expires, entitlement = "free", None, "revoked"
+                else:
+                    entitlement = "unchanged"  # a lapsed or manually granted plan has no days of this payment left to take
+            res = await s.execute(update(Payment).where(Payment.id == payment_id, Payment.status == was).values(status=target))
+            if res.rowcount != 1:
+                return {"ok": False, "status": None, "changed": False, "entitlement": "none", "error": "Changed by someone else; retry"}
+            s.add(PaymentEvent(payment_id=payment_id, at=now, kind=action, actor=actor[:64], from_status=was, to_status=target,
+                               entitlement=entitlement, note=note[:300]))
+            return {"ok": True, "status": target, "changed": True, "entitlement": entitlement}
+
+    async def record_payment_event(self, payment_id: str, kind: str, actor: str, note: str = "") -> None:
+        """An audit entry for something that changed no state (e.g. the provider says a dispute was resolved)."""
+        async with self.session() as s:
+            payment = await s.get(Payment, payment_id)
+            status = payment.status if payment else "?"
+            s.add(PaymentEvent(payment_id=payment_id, kind=kind, actor=actor[:64], from_status=status, to_status=status, note=note[:300]))
+            await s.commit()
+
+    async def payment_events(self, payment_id: str) -> list[dict]:
+        async with self.session() as s:
+            q = select(PaymentEvent).where(PaymentEvent.payment_id == payment_id).order_by(PaymentEvent.id)
+            return [e.public() for e in (await s.execute(q)).scalars()]
+
+    async def payments_needing_attention(self, statuses=("held", "disputed"), limit: int = 100) -> list[dict]:
+        async with self.session() as s:
+            q = (select(Payment, User.email).join(User, User.id == Payment.user_id, isouter=True)
+                 .where(Payment.status.in_(statuses)).order_by(Payment.created.desc()).limit(limit))
+            return [{**p.public(), "user_id": p.user_id, "email": email} for p, email in (await s.execute(q)).all()]
 
     async def set_tier(self, user_id: str, tier: str, expires: float | None = None) -> None:
         async with self.session() as s:
@@ -419,7 +531,9 @@ class Database:
             paid = (await s.execute(select(func.count()).select_from(Payment).where(Payment.status == "paid"))).scalar_one()
             open_reports = (await s.execute(select(func.count()).select_from(Report).where(Report.status == "open"))).scalar_one()
             held = (await s.execute(select(func.count()).select_from(Payment).where(Payment.status == "held"))).scalar_one()
-            return {"users": users, "paid_payments": paid, "open_reports": open_reports, "held_payments": held}
+            disputed = (await s.execute(select(func.count()).select_from(Payment).where(Payment.status == "disputed"))).scalar_one()
+            return {"users": users, "paid_payments": paid, "open_reports": open_reports, "held_payments": held,
+                    "disputed_payments": disputed}
 
     # --- API keys
     async def create_key(self, user_id: str, name: str, key_hash: str, webhook_secret: str, key_id: str) -> ApiKey:
