@@ -236,7 +236,9 @@ await step('service worker registers and manifest has share target + icons', asy
 
 await browser.close();
 for (const [s, n] of results) console.log(`${s}  ${n}`);
-const pageProblems = problems.filter((p) => !/Failed to load resource.*(451|400|401|404|409|422|429|503)/.test(p));
+// Expected noise: error statuses the steps provoke on purpose, and the network errors of the deliberate offline step.
+const pageProblems = problems.filter((p) => !/Failed to load resource.*(451|400|401|404|409|422|429|503|ERR_INTERNET_DISCONNECTED)/.test(p)
+  && !/An unknown error occurred when fetching the script|Failed to register a ServiceWorker/.test(p));
 console.log(pageProblems.length ? `\nBrowser console problems:\n${pageProblems.join('\n')}` : '\nNo unexpected browser console errors or CSP violations.');
 console.log(`Artifacts (screenshots/downloads): ${out}`);
 process.exit(results.some(([s]) => s === 'FAIL') ? 1 : 0);
