@@ -7,6 +7,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="HOTLOAD_", env_file=".env", extra="ignore")
 
+    database_url: str | None = None  # default: sqlite in data_dir. Use postgresql+asyncpg://... for the hosted service
+    secret_key: str = ""  # signs session cookies; set a long random value (empty = random per process)
+    public_url: str | None = None  # e.g. https://hotload.example (OAuth callbacks, same-origin check)
+    cookie_secure: bool = False  # set true when served over HTTPS
+    registration_open: bool = True
+    quotas_enabled: bool = False  # self-host default: unlimited. The hosted service turns this on.
+    allowed_origins: list[str] = []  # extra Origins allowed to make state-changing requests (e.g. extensions)
+    github_client_id: str | None = None
+    github_client_secret: str | None = None
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
     redis_url: str = "redis://localhost:6379/0"
     data_dir: Path = Path("data")
     file_ttl_seconds: int = 3600
@@ -34,6 +45,10 @@ class Settings(BaseSettings):
     extract_timeout_seconds: int = 30
     trust_proxy_headers: bool = False  # honour X-Forwarded-For (set behind a reverse proxy)
     ffmpeg_location: str | None = None
+
+    @property
+    def db_url(self) -> str:
+        return self.database_url or f"sqlite+aiosqlite:///{self.data_dir.resolve() / 'hotload.db'}"
 
     @property
     def output_dir(self) -> Path:

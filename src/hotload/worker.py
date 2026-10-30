@@ -11,6 +11,7 @@ from arq.connections import RedisSettings
 
 from . import canary, engine, logging_setup, metrics, storage
 from .config import get_settings
+from .db import Database
 from .jobs import JobStore
 from .logging_setup import log, url_ref
 from .proxies import NoProxyAvailable, ProxyPool, mask
@@ -102,6 +103,12 @@ async def run_download(ctx: dict, job_id: str) -> None:
         job.message = str(error) if error else "No working connection was available, try again later"
     await store.save(job)
 
+    if job.user_id:
+        try:
+            await ctx["db"].finish_history(job)
+        except Exception:  # noqa: BLE001 - history is best-effort; never fail a finished download over it
+            logger.exception("history update failed", extra={"ctx": {"job": job.id}})
+
     elapsed = time.monotonic() - started
     await metrics.inc(redis, "hotload_jobs_total", state=job.state, preset=job.preset, adult=str(job.adult).lower())
     await metrics.observe(redis, "hotload_job_seconds", elapsed, state=job.state)
@@ -132,9 +139,13 @@ async def startup(ctx: dict) -> None:
     s.output_dir.mkdir(parents=True, exist_ok=True)
     ctx["redis_client"] = Redis.from_url(s.redis_url, decode_responses=True)
     ctx["store"] = JobStore(ctx["redis_client"], s.job_ttl_seconds)
+    s.data_dir.mkdir(parents=True, exist_ok=True)
+    ctx["db"] = Database(s)
+    await ctx["db"].create_all()
 
 
 async def shutdown(ctx: dict) -> None:
+    await ctx["db"].dispose()
     await ctx["redis_client"].aclose()
 
 

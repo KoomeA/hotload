@@ -8,16 +8,19 @@ from typing import Literal
 from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 from redis.asyncio import Redis
+from starlette.middleware.sessions import SessionMiddleware
 from zipstream import ZipStream
 
-from .. import canary, compliance, engine, logging_setup, metrics, ratelimit, security
+from .. import auth, canary, compliance, engine, logging_setup, metrics, ratelimit, security, tiers
 from ..config import Settings, get_settings
+from ..db import Database
 from ..jobs import BatchStore, JobStore
 from ..proxies import NoProxyAvailable, ProxyPool
+from .accounts import add_account_routes, origin_allowed
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -61,11 +64,16 @@ class PlaylistRequest(BaseModel):
 def create_app(settings: Settings | None = None, redis: Redis | None = None, enqueue=None) -> FastAPI:
     """App factory. `redis` and `enqueue` are injectable for tests."""
     settings = settings or get_settings()
+    secret = settings.secret_key or secrets.token_urlsafe(48)  # per-process if unset: sessions reset on restart
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         logging_setup.setup()
         app.state.pool = ProxyPool.from_settings(settings)
+        settings.data_dir.mkdir(parents=True, exist_ok=True)
+        app.state.db = Database(settings)
+        await app.state.db.create_all()
+        app.state.sessions = auth.Sessions(secret)
         settings.output_dir.mkdir(parents=True, exist_ok=True)
         app.state.redis = redis or Redis.from_url(settings.redis_url, decode_responses=True)
         app.state.store = JobStore(app.state.redis, settings.job_ttl_seconds)
@@ -79,10 +87,19 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         yield
         if pool:
             await pool.aclose()
+        await app.state.db.dispose()
         if redis is None:
             await app.state.redis.aclose()
 
     app = FastAPI(title="Hotload", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(SessionMiddleware, secret_key=secret, session_cookie="hl_oauth", same_site="lax",
+                       https_only=settings.cookie_secure, max_age=600)
+
+    @app.middleware("http")
+    async def same_origin(request: Request, call_next):
+        if request.method not in ("GET", "HEAD", "OPTIONS") and not origin_allowed(request, settings):
+            return JSONResponse({"detail": "Cross-site request blocked"}, status_code=403)
+        return await call_next(request)
 
     def client_ip(request: Request) -> str:
         if settings.trust_proxy_headers:
@@ -161,25 +178,50 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         info["age_gate_required"] = info["adult"] and settings.require_age_gate
         return info
 
-    async def new_job(url: str, o: JobOptions, batch_id: str | None = None):
+    async def who(request: Request):
+        user = await app.state.current_user(request)
+        return user, tiers.tier_for(user)
+
+    def precheck(url: str, o: JobOptions, tier: tiers.Tier) -> bool:
+        """Validate options for one URL against the preset, age gate and plan. Returns whether it is adult."""
         if o.preset not in engine.PRESETS:
             raise HTTPException(400, "Unknown preset")
-        if engine.PRESETS[o.preset].subs_only and not o.subtitle_langs:
+        preset = engine.PRESETS[o.preset]
+        if preset.subs_only and not o.subtitle_langs:
             raise HTTPException(400, "Choose at least one subtitle language")
+        if settings.quotas_enabled:
+            if (o.start is not None or o.end is not None) and not preset.audio_codec and not preset.subs_only \
+                    and not tier.trim_video:
+                raise HTTPException(403, "Trimming video needs a Premium plan (audio trimming is free)")
         try:
-            adult = compliance.enforce_age_gate(url, None, o.age_confirmed, settings.require_age_gate)
+            return compliance.enforce_age_gate(url, None, o.age_confirmed, settings.require_age_gate)
         except compliance.AgeGateRequired as exc:
             raise HTTPException(451, str(exc)) from exc
-        return await app.state.store.create(
+
+    async def spend_quota(request: Request, user, tier: tiers.Tier, cost: int) -> None:
+        if settings.quotas_enabled and not await tiers.consume(
+                app.state.redis, tiers.subject(user, client_ip(request)), tier, cost):
+            raise HTTPException(429, f"Daily limit reached for your plan ({tier.jobs_per_window} downloads per 12 hours)")
+
+    async def new_job(url: str, o: JobOptions, adult: bool, user, tier: tiers.Tier, batch_id: str | None = None):
+        job = await app.state.store.create(
             url=url, preset=o.preset, start=o.start, end=o.end, subtitle_langs=o.subtitle_langs,
             subtitle_format=o.subtitle_format, subtitle_mode=o.subtitle_mode, subtitle_auto=o.subtitle_auto,
             audio_lang=o.audio_lang, adult=adult, age_confirmed=o.age_confirmed, batch_id=batch_id,
+            user_id=user.id if user else None,
+            max_duration=tier.max_duration if settings.quotas_enabled else None,
         )
+        if user:
+            await app.state.db.add_history(user.id, job)
+        return job
 
     @app.post("/api/v1/jobs", status_code=202)
     async def create_job(body: JobRequest, request: Request):
         url = await guard(request, body.url)
-        job = await new_job(url, body)
+        user, tier = await who(request)
+        adult = precheck(url, body, tier)
+        await spend_quota(request, user, tier, 1)
+        job = await new_job(url, body, adult, user, tier)
         await app.state.enqueue(job.id)
         return job.public()
 
@@ -206,8 +248,10 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
 
     @app.post("/api/v1/batches", status_code=202)
     async def create_batch(body: BatchRequest, request: Request):
-        if len(body.urls) > settings.max_batch_size:
-            raise HTTPException(400, f"At most {settings.max_batch_size} links per batch")
+        user, tier = await who(request)
+        limit = min(settings.max_batch_size, tier.batch_size) if settings.quotas_enabled else settings.max_batch_size
+        if len(body.urls) > limit:
+            raise HTTPException(400, f"Your plan allows up to {limit} links per batch")
         await guard(request, cost=len(body.urls))
         urls = []
         for raw in dict.fromkeys(u.strip() for u in body.urls if u.strip()):
@@ -215,7 +259,9 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
                 urls.append(await asyncio.to_thread(security.validate_url, raw, settings))
             except security.UnsafeURL as exc:
                 raise HTTPException(400, f"{raw[:80]}: {exc}") from exc
-        jobs = [await new_job(u, body) for u in urls]
+        adults = [precheck(u, body, tier) for u in urls]
+        await spend_quota(request, user, tier, len(urls))
+        jobs = [await new_job(u, body, adult, user, tier) for u, adult in zip(urls, adults, strict=True)]
         batch = await app.state.batches.create([j.id for j in jobs])
         for j in jobs:
             j.batch_id = batch.id
@@ -299,6 +345,8 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         if job.state != "done" or not job.path or not Path(job.path).is_file():
             raise HTTPException(404, "File is not available")
         return FileResponse(job.path, filename=job.filename)
+
+    add_account_routes(app, settings, client_ip)
 
     if WEB_DIR.exists():
         app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")

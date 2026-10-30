@@ -88,3 +88,30 @@ async def test_worker_does_not_retry_permanent_errors(tmp_path, monkeypatch):
     await worker.run_download({"store": store}, job.id)
     failed = await store.get(job.id)
     assert len(calls) == 1 and failed.state == "error" and failed.message == "Unsupported URL"
+
+
+async def test_worker_updates_history_for_signed_in_users(tmp_path, monkeypatch):
+    from hotload import engine
+    from hotload.db import Database
+    from hotload.proxies import ProxyPool
+
+    settings = Settings(data_dir=tmp_path)
+    monkeypatch.setattr(worker, "get_settings", lambda: settings)
+    monkeypatch.setattr(worker, "_pool", ProxyPool())
+
+    def fake_download(url, s, workdir, preset, proxy=None, **kw):
+        workdir.mkdir(parents=True, exist_ok=True)
+        (workdir / "v.mp3").write_bytes(b"x")
+        return engine.DownloadResult(workdir / "v.mp3", "A fine title", "Generic")
+
+    monkeypatch.setattr(engine, "download", fake_download)
+    db = Database(settings)
+    await db.create_all()
+    user = await db.add_user(email="u@example.com", password_hash="x")
+    store = JobStore(FakeAsyncRedis(decode_responses=True), 600)
+    job = await store.create(url="https://example.com/v", preset="mp3", user_id=user.id)
+    await db.add_history(user.id, job)
+    await worker.run_download({"store": store, "db": db}, job.id)
+    [entry] = await db.list_history(user.id)
+    assert entry["state"] == "done" and entry["title"] == "A fine title" and entry["site"] == "Generic"
+    await db.dispose()
