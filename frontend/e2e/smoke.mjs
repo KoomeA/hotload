@@ -68,6 +68,24 @@ await step('dark theme toggle sets data-theme and persists on reload', async () 
   await page.getByLabel('Theme').selectOption('system');
 });
 
+await step('thumbnails load through our own origin; the browser never contacts a third-party host', async () => {
+  const hosts = new Set();
+  const spy = (r) => hosts.add(new URL(r.url()).origin);
+  page.on('request', spy);
+  await page.goto(BASE + '/');
+  await page.getByLabel('Video or audio link').fill(BBB);
+  await page.getByRole('button', { name: 'Fetch' }).click();
+  await page.getByRole('heading', { name: 'Big Buck Bunny' }).waitFor({ timeout: 60000 });
+  const img = page.locator('.media img');
+  await img.waitFor();
+  await page.waitForFunction(() => document.querySelector('.media img')?.complete);
+  const src = await img.getAttribute('src');
+  ok(src.startsWith('/api/v1/thumb?u='), `thumbnail src is ${src}`);
+  ok((await img.evaluate((el) => el.naturalWidth)) > 0, 'the proxied thumbnail actually rendered');
+  page.off('request', spy);
+  ok([...hosts].every((h) => h === new URL(BASE).origin), `third-party requests: ${[...hosts].filter((h) => h !== new URL(BASE).origin)}`);
+});
+
 await step('single video: fetch, trim to 5s, MP3 download is ~5s', async () => {
   await page.getByLabel('Video or audio link').fill(BBB);
   await page.getByRole('button', { name: 'Fetch' }).click();
@@ -185,6 +203,27 @@ await step('mobile viewport: no horizontal scroll, controls reachable', async ()
   await p.screenshot({ path: path.join(out, 'mobile.png'), fullPage: true });
   ok(overflow <= 0, `horizontal overflow ${overflow}px`);
   await m.close();
+});
+
+await step('offline: the app shell loads from the service worker cache', async () => {
+  await page.goto(BASE + '/');
+  await page.evaluate(() => navigator.serviceWorker.ready);
+  await page.waitForFunction(async () => {
+    const names = await caches.keys();
+    for (const n of names) {
+      const urls = (await (await caches.open(n)).keys()).map((r) => new URL(r.url).pathname);
+      if (urls.includes('/') && urls.some((u) => u.startsWith('/_app/immutable/'))) return true;
+    }
+    return false;
+  }, null, { timeout: 20000 });  // cached under ABSOLUTE paths: the review found relative manifest paths never matched
+  await ctx.setOffline(true);
+  try {
+    await page.goto(BASE + '/', { waitUntil: 'domcontentloaded' });
+    await page.getByRole('heading', { level: 1 }).waitFor({ timeout: 15000 });
+    await page.getByLabel('Video or audio link').waitFor();
+  } finally {
+    await ctx.setOffline(false);
+  }
 });
 
 await step('service worker registers and manifest has share target + icons', async () => {

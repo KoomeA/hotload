@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import re
 import sys
 import time
 
@@ -19,6 +20,21 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(out, default=str)
 
 
+_SECRET_QS = re.compile(r"([?&](?:token|key|sig|s)=)[^&\s\"']+", re.IGNORECASE)
+
+
+class RedactTokens(logging.Filter):
+    """uvicorn's access log prints the request path with its query string. Download and zip links carry a capability
+    token there (?token=...), so the log would hold working download links. Replace the values before they are written."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(_SECRET_QS.sub(r"\1REDACTED", a) if isinstance(a, str) else a for a in record.args)
+        if isinstance(record.msg, str):
+            record.msg = _SECRET_QS.sub(r"\1REDACTED", record.msg)
+        return True
+
+
 def setup(level: str = "INFO") -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
@@ -31,6 +47,13 @@ def setup(level: str = "INFO") -> None:
     # httpx logs full request URLs at INFO. Telegram puts the bot token in the URL path, so never let it through.
     for noisy in ("httpx", "httpcore"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+    for name in ("uvicorn.access", "uvicorn.error", ""):
+        target = logging.getLogger(name)
+        if not any(isinstance(f, RedactTokens) for f in target.filters):
+            target.addFilter(RedactTokens())
+    for h in root.handlers:  # handlers too: a record from any logger passes the handler filters
+        if getattr(h, "_hotload", False) and not any(isinstance(f, RedactTokens) for f in h.filters):
+            h.addFilter(RedactTokens())
 
 
 def url_ref(url: str) -> str:

@@ -1,4 +1,5 @@
 <script>
+  import { onDestroy } from 'svelte';
   import { ApiError, api } from '#lib/api.js';
   import { getLocale, t } from '#lib/i18n.svelte.js';
 
@@ -9,9 +10,15 @@
   let name = $state('');
   let fresh = $state(null); // the only time the key and webhook secret are visible
   let copied = $state('');
+  let hideTimer = null;
   let error = $state('');
 
   const locked = $derived(me?.limits?.enforced && me?.tier !== 'pro');
+
+  onDestroy(() => {
+    clearTimeout(hideTimer);
+    fresh = null;
+  });
 
   // (re)load when the plan changes, e.g. right after a successful payment unlocks keys
   $effect(() => {
@@ -30,6 +37,8 @@
     error = '';
     try {
       fresh = await api('/api/v1/me/keys', { method: 'POST', body: { name } });
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => (fresh = null), 120000); // a revealed secret does not sit on screen indefinitely
       name = '';
       await load();
     } catch (e) {
@@ -73,7 +82,7 @@
         {#each [['keys.key', fresh.key], ['keys.secret', fresh.webhook_secret]] as [label, value]}
           <label for={label}>{t(label)}</label>
           <div class="copyrow">
-            <input id={label} type="text" readonly {value} onfocus={(e) => e.currentTarget.select()} />
+            <input id={label} type="text" readonly {value} autocomplete="off" spellcheck="false" onfocus={(e) => e.currentTarget.select()} />
             <button type="button" class="secondary" onclick={() => copy(label, value)}>{copied === label ? t('keys.copied') : t('keys.copy')}</button>
           </div>
         {/each}

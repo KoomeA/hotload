@@ -84,7 +84,11 @@ $('dl').addEventListener('click', async () => {
     const es = new EventSource(`/api/v1/jobs/${job.id}/events`);
     es.onmessage = ev => {
       const j = JSON.parse(ev.data); $('bar').value = j.progress; $('status').textContent = j.message || j.state;
-      if (j.state === 'done') { es.close(); $('status').innerHTML = `<a class="dl" href="${j.download_url}" download>Save ${j.filename}</a>`; $('dl').disabled = false; }
+      if (j.state === 'done') {
+        es.close();
+        const a = document.createElement('a'); a.className = 'dl'; a.href = j.download_url; a.download = ''; a.textContent = 'Save ' + j.filename;  // textContent: never HTML
+        $('status').replaceChildren(a); $('dl').disabled = false;
+      }
       if (j.state === 'error') { es.close(); fail(j.message); $('dl').disabled = false; }
     };
     es.onerror = () => { es.close(); $('dl').disabled = false; };

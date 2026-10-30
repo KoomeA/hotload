@@ -10,7 +10,7 @@ from typing import Literal
 import httpx
 from arq import create_pool
 from arq.connections import RedisSettings
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     FileResponse,
@@ -35,6 +35,7 @@ from .. import (
     ratelimit,
     security,
     storage,
+    thumbs,
     tiers,
 )
 from ..billing.service import BillingService, build_providers
@@ -288,7 +289,26 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
             raise HTTPException(451, "This content is not available")
         info["adult"] = compliance.is_adult(url, info)
         info["age_gate_required"] = info["adult"] and settings.require_age_gate
+        # The browser only ever loads same-origin images: the remote thumbnail URL never reaches the page.
+        info["thumbnail"] = thumbs.sign(secret, info.get("thumbnail"))
         return info
+
+    @app.get("/api/v1/thumb")
+    async def thumbnail(request: Request, u: str = Query(..., max_length=3000), s: str = Query(..., max_length=100)):
+        """Same-origin proxy for the thumbnails `/extract` hands out (signed, so this is not an open image proxy)."""
+        await poll_guard(request, "thumb", 120)
+        try:
+            url = thumbs.verify(secret, u, s)
+            if (await app.state.rules.get()).blocks_url(url):
+                raise thumbs.ThumbError("Not available", 451)
+            data, ctype = await thumbs.fetch(url, settings, app.state.http)
+        except thumbs.ThumbError as exc:
+            raise HTTPException(exc.status, str(exc)) from exc
+        return Response(data, media_type=ctype, headers={
+            "Cache-Control": "private, max-age=3600",
+            "Content-Security-Policy": "default-src 'none'; sandbox",  # an image must never run as a document
+            "Content-Disposition": "inline",
+        })
 
     async def require_cookie_access(user, url: str) -> None:
         """Opting in to saved cookies needs an account whose plan allows it, with cookies saved for this very site."""

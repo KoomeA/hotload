@@ -23,7 +23,7 @@
   onMount(async () => {
     const code = new URLSearchParams(location.search).get('error');
     if (code) {
-      error = t(oauthErrors[code] ?? 'error.generic');
+      error = t(Object.hasOwn(oauthErrors, code) ? oauthErrors[code] : 'error.generic');
       history_replace();
     }
     api('/api/v1/auth/providers').then((p) => (providers = p)).catch(() => {});

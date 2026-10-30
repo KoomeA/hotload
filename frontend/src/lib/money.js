@@ -8,11 +8,15 @@ export function formatMoney(amountMinor, currency, locale = 'en') {
   }
 }
 
-/** Only follow checkout URLs that are plain web links (never javascript:, data:, etc.). */
+const LOCAL = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+/** Only follow checkout URLs that are https links (plain http only for localhost, i.e. local development).
+ *  Never javascript:, data:, file:, or an unencrypted payment page. */
 export function safeRedirect(url) {
   try {
     const u = new URL(url);
-    return u.protocol === 'https:' || u.protocol === 'http:' ? u.href : null;
+    if (u.protocol === 'https:') return u.href;
+    return u.protocol === 'http:' && LOCAL.has(u.hostname) ? u.href : null;
   } catch {
     return null;
   }

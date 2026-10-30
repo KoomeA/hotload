@@ -4,7 +4,9 @@ import { assets, immutable, prerendered } from '$app/manifest';
 
 // App shell only. API calls, downloads, and anything with credentials are never cached.
 const CACHE = `hotload-${version}`;
-const SHELL = [...immutable, ...assets, ...prerendered].map((e) => e.path);
+// Manifest paths can be relative ("_app/x.js", "account/"), while request pathnames are absolute: normalise, or nothing matches.
+const pathname = (p) => new URL(p, self.location.origin + '/').pathname;
+const SHELL = [...immutable, ...assets, ...prerendered].map((e) => pathname(e.path));
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

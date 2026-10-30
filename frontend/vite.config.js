@@ -13,7 +13,7 @@ export default defineConfig({
           'default-src': ['self'],
           'script-src': ['self'],
           'style-src': ['self', 'unsafe-inline'],
-          'img-src': ['self', 'data:', 'https:'],
+          'img-src': ['self', 'data:'], // thumbnails come through our own /api/v1/thumb, never straight from third-party hosts
           'connect-src': ['self'],
           'base-uri': ['self'],
           'form-action': ['self'],

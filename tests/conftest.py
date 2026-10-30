@@ -74,3 +74,14 @@ def logs():
     yield c
     root.removeHandler(c.handler)
     root.setLevel(previous)
+
+
+@pytest.fixture(autouse=True)
+def no_proxy_environment(monkeypatch):
+    """Tests must not depend on the machine's HTTP(S)_PROXY settings (CI runners and this sandbox differ). A test that is
+    about proxies sets them explicitly."""
+    import os
+
+    for key in list(os.environ):
+        if "proxy" in key.lower():
+            monkeypatch.delenv(key)

@@ -94,9 +94,12 @@ describe('money', () => {
     expect(formatMoney(500, 'JPY', 'en')).toMatch(/500/);
     expect(formatMoney(1000, 'NOPE!', 'en')).toBe('10.00 NOPE!');
   });
-  it('only follows http(s) checkout links', () => {
+  it('only follows https checkout links (plain http only for localhost)', () => {
     expect(safeRedirect('https://checkout.paystack.com/abc')).toBe('https://checkout.paystack.com/abc');
-    for (const bad of ['javascript:alert(1)', 'data:text/html,x', 'file:///etc/passwd', 'nonsense', '']) expect(safeRedirect(bad)).toBeNull();
+    expect(safeRedirect('http://127.0.0.1:9100/pay/x')).toBe('http://127.0.0.1:9100/pay/x');
+    expect(safeRedirect('http://localhost:8000/pay')).toBe('http://localhost:8000/pay');
+    for (const bad of ['http://pay.example.com/abc', 'http://127.0.0.1.evil.example/x', 'javascript:alert(1)', 'data:text/html,x',
+      'file:///etc/passwd', 'ftp://x.example/', 'nonsense', '']) expect(safeRedirect(bad)).toBeNull();
   });
   it('reads our payment id, falling back to the provider reference', () => {
     expect(returnedPaymentId(new URLSearchParams('payment=AbC_123-xyz'))).toBe('AbC_123-xyz');
