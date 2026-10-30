@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     # Generate one with: python -m hotload.admin cookie-key
     cookie_key: str | None = None
     max_live_minutes: int = 60  # longest live recording a job may request (a worker slot is held that long)
+    # --- Telegram bot (needs public_url too: replies carry download links) ---
+    telegram_bot_token: str | None = None
+    telegram_webhook_secret: str | None = None  # Telegram echoes it in X-Telegram-Bot-Api-Secret-Token
+    telegram_allowed_chats: list[int] = []  # empty = anyone may use the bot
+    telegram_api_base: str = "https://api.telegram.org"
     redis_url: str = "redis://localhost:6379/0"
     data_dir: Path = Path("data")
     file_ttl_seconds: int = 3600

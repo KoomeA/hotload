@@ -44,6 +44,7 @@ from ..proxies import NoProxyAvailable, ProxyPool
 from .accounts import add_account_routes, origin_allowed
 from .admin import RuleCache, add_admin_routes
 from .billing import add_billing_routes
+from .bots import add_bot_routes
 from .cookies import add_cookie_routes
 from .keys import add_key_routes, record_usage
 
@@ -498,6 +499,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
     add_key_routes(app, settings)
     add_admin_routes(app, settings, client_ip)
     add_cookie_routes(app, settings, client_ip)
+    add_bot_routes(app, settings)
 
     web_dir = settings.web_dir or WEB_DIR
     if web_dir.exists():

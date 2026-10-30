@@ -25,6 +25,9 @@ def setup(level: str = "INFO") -> None:
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(level)
+    # httpx logs full request URLs at INFO. Telegram puts the bot token in the URL path, so never let it through.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 def url_ref(url: str) -> str:

@@ -11,7 +11,7 @@ import httpx
 from arq import Retry, cron
 from arq.connections import RedisSettings
 
-from . import canary, engine, logging_setup, metrics, storage, webhooks
+from . import canary, engine, logging_setup, metrics, notify, storage, webhooks
 from .blocklist import Blocklist
 from .config import get_settings
 from .cookies import CookieVault
@@ -156,6 +156,9 @@ async def _run_download(ctx: dict, job, cookie_path) -> None:
             await ctx["db"].finish_history(job)
         except Exception:  # noqa: BLE001 - history is best-effort; never fail a finished download over it
             logger.exception("history update failed", extra={"ctx": {"job": job.id}})
+
+    if job.notify and ctx.get("http") is not None:
+        await notify.notify_finished(ctx["http"], settings, job)
 
     if job.webhook_url and job.key_id:
         extra = {"_queue_name": ctx["queue_name"]} if ctx.get("queue_name") else {}
