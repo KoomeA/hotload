@@ -1,4 +1,5 @@
 import { PRESETS, authHeaders, errorText, normalizeServer } from './lib.js';
+import { ext } from './compat.js';
 
 const $ = (id) => document.getElementById(id);
 const say = (text, bad = false) => {
@@ -8,7 +9,7 @@ const say = (text, bad = false) => {
 
 for (const [value, label] of PRESETS) $('preset').add(new Option(label, value));
 
-chrome.storage.local.get(['server', 'key', 'preset']).then(({ server, key, preset }) => {
+ext.storage.local.get(['server', 'key', 'preset']).then(({ server, key, preset }) => {
   $('server').value = server ?? '';
   $('key').value = key ?? '';
   if (preset) $('preset').value = preset;
@@ -18,7 +19,7 @@ $('form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const server = normalizeServer($('server').value);
   if (!server) return say('Enter a valid https address (http only for localhost).', true);
-  await chrome.storage.local.set({ server, key: $('key').value.trim(), preset: $('preset').value });
+  await ext.storage.local.set({ server, key: $('key').value.trim(), preset: $('preset').value });
   $('server').value = server;
   say('Saved.');
 });

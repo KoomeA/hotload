@@ -1,4 +1,5 @@
 import { PRESETS, downloadLink, errorText, isDownloadableUrl, jobRequest, openUrl, shortHost, authHeaders } from './lib.js';
+import { ext } from './compat.js';
 
 const $ = (id) => document.getElementById(id);
 const show = (id, on = true) => ($(id).hidden = !on);
@@ -7,12 +8,12 @@ async function currentTab() {
   // `?url=&title=` lets the popup be opened as a normal tab (used by the end-to-end test); otherwise use the active tab.
   const q = new URLSearchParams(location.search);
   if (q.get('url')) return { url: q.get('url'), title: q.get('title') || '' };
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const [tab] = await ext.tabs.query({ active: true, currentWindow: true });
   return tab ?? {};
 }
 
 async function main() {
-  const { server, key, preset = 'mp3' } = await chrome.storage.local.get(['server', 'key', 'preset']);
+  const { server, key, preset = 'mp3' } = await ext.storage.local.get(['server', 'key', 'preset']);
   const tab = await currentTab();
   if (!server) return show('setup');
   if (!isDownloadableUrl(tab.url)) return show('bad');
@@ -20,7 +21,7 @@ async function main() {
   show('ready');
   $('title').textContent = tab.title || tab.url;
   $('host').textContent = shortHost(tab.url);
-  $('open').addEventListener('click', () => chrome.tabs.create({ url: openUrl(server, tab.url) }));
+  $('open').addEventListener('click', () => ext.tabs.create({ url: openUrl(server, tab.url) }));
 
   if (!key) return show('hint');
   show('quick');
@@ -68,5 +69,5 @@ async function watch(server, key, id) {
   $('go').disabled = false;
 }
 
-$('open-options').addEventListener('click', () => chrome.runtime.openOptionsPage());
+$('open-options').addEventListener('click', () => ext.runtime.openOptionsPage());
 main();

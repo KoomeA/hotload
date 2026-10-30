@@ -10,3 +10,6 @@ node_modules/
 frontend/build/
 frontend/.svelte-kit/
 /build/
+
+# extension build output
+dist/
