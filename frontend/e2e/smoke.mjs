@@ -24,6 +24,9 @@ const step = async (name, fn) => {
     results.push(['PASS', name]);
   } catch (e) {
     results.push(['FAIL', `${name}: ${String(e.message).split('\n')[0]}`]);
+    const stuck = [...inflight].map((r) => r.url().slice(0, 100));
+    if (stuck.length) results.push(['INFO', `  requests still in flight: ${stuck.join(', ')}`]);
+    await page.screenshot({ path: path.join(out, `fail-${results.length}.png`) }).catch(() => {});
   }
 };
 const ok = (cond, msg) => { if (!cond) throw new Error(msg); };
@@ -32,6 +35,9 @@ const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || 
 const ctx = await browser.newContext({ viewport: { width: 1000, height: 900 }, acceptDownloads: true, locale: 'en-US' });
 const page = await ctx.newPage();
 page.on('console', (m) => { if (['error', 'warning'].includes(m.type())) problems.push(`console ${m.type()}: ${m.text()}`); });
+const inflight = new Set();
+page.on('request', (r) => inflight.add(r));
+for (const ev of ['requestfinished', 'requestfailed']) page.on(ev, (r) => inflight.delete(r));
 page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
 
 async function save(link, name) {
