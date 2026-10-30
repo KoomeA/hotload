@@ -84,3 +84,25 @@ describe('api', () => {
     expect(messageFrom({}, 500)).toBe('Error 500');
   });
 });
+
+import { formatMoney, returnedPaymentId, safeRedirect } from './money.js';
+
+describe('money', () => {
+  it('formats minor units for the locale and survives bad currencies', () => {
+    expect(formatMoney(999, 'USD', 'en')).toBe('$9.99');
+    expect(formatMoney(129900, 'KES', 'en')).toMatch(/1,299/);
+    expect(formatMoney(500, 'JPY', 'en')).toMatch(/500/);
+    expect(formatMoney(1000, 'NOPE!', 'en')).toBe('10.00 NOPE!');
+  });
+  it('only follows http(s) checkout links', () => {
+    expect(safeRedirect('https://checkout.paystack.com/abc')).toBe('https://checkout.paystack.com/abc');
+    for (const bad of ['javascript:alert(1)', 'data:text/html,x', 'file:///etc/passwd', 'nonsense', '']) expect(safeRedirect(bad)).toBeNull();
+  });
+  it('reads our payment id, falling back to the provider reference', () => {
+    expect(returnedPaymentId(new URLSearchParams('payment=AbC_123-xyz'))).toBe('AbC_123-xyz');
+    expect(returnedPaymentId(new URLSearchParams('trxref=Pay_REF_99&reference=Pay_REF_99'))).toBe('Pay_REF_99');
+    expect(returnedPaymentId(new URLSearchParams('payment=<script>'))).toBeNull();
+    expect(returnedPaymentId(new URLSearchParams('payment=ab'))).toBeNull();
+    expect(returnedPaymentId(new URLSearchParams(''))).toBeNull();
+  });
+});

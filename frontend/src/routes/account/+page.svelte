@@ -1,5 +1,7 @@
 <script>
   import { onMount } from 'svelte';
+  import KeysSection from '#lib/components/KeysSection.svelte';
+  import PlansSection from '#lib/components/PlansSection.svelte';
   import { ApiError, api } from '#lib/api.js';
   import { t } from '#lib/i18n.svelte.js';
   import { refreshSession, session } from '#lib/session.svelte.js';
@@ -140,6 +142,10 @@
     <div class="row"><button class="secondary" onclick={signOut}>{t('sign_out')}</button></div>
   </section>
 
+  <PlansSection {me} onchange={load} />
+
+  {#if me}<KeysSection {me} />{/if}
+
   <section class="card">
     <h2>{t('history.title')}</h2>
     {#if history.length}
@@ -174,8 +180,12 @@
 {/if}
 
 <style>
-  .hist { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+  /* minmax(0, 1fr): a bare grid column will not shrink below its content, so a long URL would overflow the card */
+  .hist { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .hist li { display: flex; gap: 8px; align-items: center; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+  /* min-width: 0 lets the text column shrink (and ellipsise) instead of pushing the button out of the card */
+  .hist .grow { flex: 1; min-width: 0; }
+  .hist .btn { flex: none; }
   .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .small { font-size: 0.85rem; }
   [role='tab'][aria-selected='true'] { outline: 2px solid var(--accent); outline-offset: 2px; }

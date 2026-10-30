@@ -7,6 +7,7 @@
 <header>
   <a class="logo" href="/" aria-label={t('home')}>Hot<span>load</span></a>
   <nav>
+    {#if session.user?.is_admin}<a href="/admin/">Admin</a>{/if}
     <a href="/account/">{session.user ? session.user.email : t('account')}</a>
     <label class="sr-only" for="lang">{t('language')}</label>
     <select id="lang" value={getLocale()} onchange={(e) => setLocale(e.currentTarget.value)}>

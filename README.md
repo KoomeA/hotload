@@ -9,6 +9,9 @@ Built on [yt-dlp](https://github.com/yt-dlp/yt-dlp) with an async job queue, a c
   separate), multi-audio-track selection, playlists and batches (ZIP), live job progress.
 - Installable PWA (share a link from your phone straight into Hotload), 6 languages, dark mode, keyboard accessible.
 - Optional accounts (email or GitHub/Google), download history and plan limits (off by default when self-hosting).
+- Hosted-service features: prepaid Premium/Pro passes (Paystack cards/M-Pesa, crypto via BTCPay Server), API keys with
+  usage metering and signed job webhooks, S3/R2 storage, priority queues, abuse reports and an admin takedown console.
+  Read [docs/PAYMENTS.md](docs/PAYMENTS.md) before taking payments: processor policies matter for adult-site support.
 - SSRF-hardened, rate limited, short-lived storage (files auto-delete).
 
 Status: early MVP. See [docs/PLAN.md](docs/PLAN.md) for the roadmap.
@@ -40,6 +43,17 @@ npm run build                         # static build in frontend/build
 HOTLOAD_WEB_DIR=frontend/build uvicorn hotload.api.app:app   # serve the built app from the API
 BASE=http://localhost:8000 node e2e/smoke.mjs                # browser end-to-end test (needs playwright + internet)
 ```
+
+The M3 browser test (plans, checkout, API keys, reports, admin) runs against a stack with plans enforced and a local
+stand-in for Paystack. Start from a **fresh Redis database** each time (sign-up and report rate limits are real):
+```bash
+python frontend/e2e/fake_paystack.py 9100 &
+HOTLOAD_QUOTAS_ENABLED=true HOTLOAD_PAYSTACK_SECRET_KEY=sk_test_e2e HOTLOAD_PAYSTACK_BASE_URL=http://127.0.0.1:9100 \
+  HOTLOAD_PUBLIC_URL=http://localhost:8001 HOTLOAD_SECRET_KEY=dev HOTLOAD_WEB_DIR=frontend/build \
+  uvicorn hotload.api.app:app --port 8001 &
+BASE=http://localhost:8001 PYTHON=python node frontend/e2e/m3.mjs
+```
+Make someone an admin (only from the server, never by email): `python -m hotload.admin grant you@example.com`.
 
 ## License
 

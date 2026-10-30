@@ -156,11 +156,15 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
             raise HTTPException(429, "Too many requests, slow down")
         if url is None:
             return None
+        # Takedown rules first: no DNS lookup for blocked content, and a blocked host answers 451 even if DNS is down.
+        rules = await app.state.rules.get()
+        if rules.blocks_url(url.strip()):
+            raise HTTPException(451, "This content is not available")
         try:
             clean = await asyncio.to_thread(security.validate_url, url, settings)
         except security.UnsafeURL as exc:
             raise HTTPException(400, str(exc)) from exc
-        if (await app.state.rules.get()).blocks_url(clean):
+        if rules.blocks_url(clean):
             raise HTTPException(451, "This content is not available")
         return clean
 
@@ -326,11 +330,14 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         hook = await check_webhook(body, key)
         urls = []
         for raw in dict.fromkeys(u.strip() for u in body.urls if u.strip()):
+            rules = await app.state.rules.get()
+            if rules.blocks_url(raw):
+                raise HTTPException(451, f"{raw[:80]}: this content is not available")
             try:
                 clean = await asyncio.to_thread(security.validate_url, raw, settings)
             except security.UnsafeURL as exc:
                 raise HTTPException(400, f"{raw[:80]}: {exc}") from exc
-            if (await app.state.rules.get()).blocks_url(clean):
+            if rules.blocks_url(clean):
                 raise HTTPException(451, f"{raw[:80]}: this content is not available")
             urls.append(clean)
         adults = [precheck(u, body, tier) for u in urls]

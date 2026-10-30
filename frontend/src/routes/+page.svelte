@@ -336,7 +336,7 @@
   .media h2 { word-break: break-word; }
   fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 16px 0 0; padding: 12px; }
   legend { padding: 0 6px; font-weight: 600; }
-  .entries { list-style: none; padding: 0; margin: 8px 0 0; max-height: 260px; overflow: auto; display: grid; gap: 4px; }
+  .entries { list-style: none; padding: 0; margin: 8px 0 0; max-height: 260px; overflow: auto; display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
   .entries li { word-break: break-all; }
   .job-list { margin-top: 16px; display: grid; gap: 4px; }
 </style>

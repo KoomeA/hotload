@@ -252,3 +252,19 @@ def test_blocklist_normalisation_and_matching():
     rules = Blocklist(items)
     assert rules.blocks_url("https://a.b.example.org/x") and not rules.blocks_url("https://example.org.evil.com/x")
     assert rules.blocks_media("Site", "1") and not rules.blocks_media("Site", "2") and not rules.blocks_media(None, "1")
+
+
+def test_blocked_hosts_answer_451_even_when_dns_fails(c, monkeypatch):
+    """Takedowns are checked before any DNS lookup, so they hold even for names that no longer resolve."""
+    import socket
+
+    def nxdomain(*a, **k):
+        raise socket.gaierror("Name or service not known")
+
+    as_admin(c)
+    assert block(c, "host", "gone.example.org").status_code == 201
+    monkeypatch.setattr("socket.getaddrinfo", nxdomain)
+    assert c.post("/api/v1/jobs", json={"url": "https://cdn.gone.example.org/x"}).status_code == 451
+    assert c.post("/api/v1/extract", json={"url": "https://gone.example.org/x"}).status_code == 451
+    assert c.post("/api/v1/batches", json={"urls": ["https://gone.example.org/x"]}).status_code == 451
+    assert c.post("/api/v1/jobs", json={"url": "https://other.example.org/x"}).status_code == 400  # unresolvable, not blocked
