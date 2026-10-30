@@ -16,7 +16,8 @@ Built on [yt-dlp](https://github.com/yt-dlp/yt-dlp) with an async job queue, a c
   Read [docs/PAYMENTS.md](docs/PAYMENTS.md) before taking payments: processor policies matter for adult-site support.
 - SSRF-hardened, rate limited, short-lived storage (files auto-delete).
 
-Status: early MVP. See [docs/PLAN.md](docs/PLAN.md) for the roadmap.
+Status: feature-complete MVP, **not yet launch-ready**. See [docs/PLAN.md](docs/PLAN.md) for the roadmap and
+[docs/LAUNCH.md](docs/LAUNCH.md) for what the pre-launch review found and the gates that remain.
 
 ## Quick start (self-host)
 

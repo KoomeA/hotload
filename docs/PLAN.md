@@ -73,3 +73,9 @@ Code layout (`src/hotload`):
   localised extension UI, sending files (not just links) through Telegram.
 - [ ] Not verified end to end: SponsorBlock against real YouTube segments (options and postprocessor definitions are tested,
   the live fetch was blocked from the test environment), the Telegram bot against the real Telegram API.
+
+### Launch readiness (2026-10-30) - review done, gates remain (see docs/LAUNCH.md)
+- [x] Four independent security reviews; every finding verified, fixed with regression tests, or recorded as accepted.
+- [x] `python -m hotload.preflight` checks a deployment's configuration; drafts of Terms/Privacy/DMCA/Refund in docs/legal.
+- [ ] Gates only you can pass: legal review, payment-processor decisions, staging with the hardened Compose overlay (never run),
+  real Paystack/BTCPay/S3/OAuth/Telegram runs, email verification and password reset, load testing (none done).
