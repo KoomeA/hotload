@@ -69,7 +69,7 @@ def make(tmp_path, monkeypatch, prov):
                "btcpay_webhook_secret": BTC_SECRET, **overrides}
         http = httpx.AsyncClient(transport=httpx.MockTransport(prov.handler))
 
-        async def enqueue(_):
+        async def enqueue(_, _queue=None):
             pass
 
         app = create_app(Settings(**cfg), redis=FakeAsyncRedis(decode_responses=True), enqueue=enqueue, http_client=http)
@@ -176,7 +176,8 @@ def test_paystack_checkout_request_is_correct(c, prov):
     sent = json.loads(req.content)
     assert req.headers["authorization"] == f"Bearer {PS_KEY}"
     assert sent["amount"] == 999 and sent["currency"] == "USD" and sent["email"] == "buyer@example.com"
-    assert sent["reference"] == body["payment_id"] and sent["callback_url"].endswith("/account/?payment=")
+    assert sent["reference"] == body["payment_id"]
+    assert sent["callback_url"] == f"http://testserver/account/?payment={body['payment_id']}"  # the return page needs the id
     assert sent["metadata"]["user_id"] == uid and body["url"] == f"https://checkout.paystack.test/{body['payment_id']}"
     [p] = c.get("/api/v1/billing/payments").json()
     assert p["status"] == "pending" and p["plan"] == "premium_30" and p["provider"] == "paystack"
@@ -189,6 +190,7 @@ def test_btcpay_checkout_request_is_correct(c, prov):
     req = prov.sent("/invoices")[0]
     sent = json.loads(req.content)
     assert req.url.path == "/api/v1/stores/STORE/invoices" and req.headers["authorization"] == "token apikey"
+    assert sent["checkout"]["redirectURL"] == f"http://testserver/account/?payment={r.json()['payment_id']}"
     assert sent["amount"] == "239.99" and sent["currency"] == "USD"
     assert sent["metadata"]["orderId"] == r.json()["payment_id"] and sent["checkout"]["redirectURL"]
 

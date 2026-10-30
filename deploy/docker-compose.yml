@@ -20,5 +20,21 @@ services:
     tmpfs: ["/tmp"]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+  # Paying plans (when HOTLOAD_QUOTAS_ENABLED=true) are queued on a separate queue so free-tier load never delays them.
+  # Remove this service for self-hosting: without plans enforced, everything uses the default queue.
+  worker-priority:
+    build: ..
+    command: ["arq", "hotload.worker.WorkerSettings"]
+    environment:
+      HOTLOAD_WORKER_QUEUE: hotload:priority
+    env_file: ../.env
+    volumes: ["media:/data"]
+    depends_on: [redis]
+    restart: unless-stopped
+    profiles: ["hosted"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
 volumes:
   media:

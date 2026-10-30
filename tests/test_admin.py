@@ -22,7 +22,7 @@ def make(tmp_path, monkeypatch):
     stack, queue = [], []
 
     def build(**overrides):
-        async def enqueue(job_id):
+        async def enqueue(job_id, _queue=None):
             queue.append(job_id)
 
         cfg = {"data_dir": tmp_path, "rate_limit_per_minute": 1000, "secret_key": "s", **overrides}

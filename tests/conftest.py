@@ -21,7 +21,7 @@ def client(settings, enqueued, monkeypatch):
     # Resolve every hostname to a public address so tests never touch DNS.
     monkeypatch.setattr("socket.getaddrinfo", lambda host, port, *a, **k: [(2, 1, 6, "", ("93.184.216.34", port))])
 
-    async def enqueue(job_id):
+    async def enqueue(job_id, _queue=None):
         enqueued.append(job_id)
 
     app = create_app(settings, redis=FakeAsyncRedis(decode_responses=True), enqueue=enqueue)

@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import re
+import shutil
 import time
 from functools import partial
 
@@ -107,9 +108,19 @@ async def run_download(ctx: dict, job_id: str) -> None:
             break
 
     if path is not None and error is None:
-        job.state, job.progress, job.message = "done", 100.0, "Ready"
-        job.path = str(path)
         job.filename = re.sub(r"[^\w .()\[\]-]", "_", path.name)
+        remote = ctx.get("remote")
+        if remote is not None:
+            try:  # object storage: upload, then drop the local copy so workers stay stateless
+                job.storage_key = await asyncio.to_thread(remote.put, job.id, path)
+                shutil.rmtree(storage.job_dir(settings.output_dir, job.id), ignore_errors=True)
+            except storage.StorageError as exc:
+                error, path = engine.EngineError(str(exc)), None
+                logger.exception("upload failed", extra={"ctx": {"job": job.id}})
+        else:
+            job.path = str(path)
+    if path is not None and error is None:
+        job.state, job.progress, job.message = "done", 100.0, "Ready"
     else:
         job.state = "error"
         job.message = str(error) if error else "No working connection was available, try again later"
@@ -122,7 +133,8 @@ async def run_download(ctx: dict, job_id: str) -> None:
             logger.exception("history update failed", extra={"ctx": {"job": job.id}})
 
     if job.webhook_url and job.key_id:
-        await ctx["redis"].enqueue_job("deliver_webhook", job.id)
+        extra = {"_queue_name": ctx["queue_name"]} if ctx.get("queue_name") else {}
+        await ctx["redis"].enqueue_job("deliver_webhook", job.id, **extra)
 
     elapsed = time.monotonic() - started
     await metrics.inc(redis, "hotload_jobs_total", state=job.state, preset=job.preset, adult=str(job.adult).lower())
@@ -157,6 +169,8 @@ async def deliver_webhook(ctx: dict, job_id: str) -> None:
 async def cleanup(ctx: dict) -> None:
     s = get_settings()
     removed = storage.cleanup_expired(s.output_dir, s.file_ttl_seconds)
+    if ctx.get("remote") is not None:
+        removed += await asyncio.to_thread(ctx["remote"].cleanup_expired, s.file_ttl_seconds)
     if removed:
         log(logger, "expired job files removed", count=removed)
 
@@ -177,6 +191,8 @@ async def startup(ctx: dict) -> None:
     ctx["store"] = JobStore(ctx["redis_client"], s.job_ttl_seconds)
     s.data_dir.mkdir(parents=True, exist_ok=True)
     ctx["http"] = httpx.AsyncClient()
+    ctx["remote"] = storage.build_remote(s)
+    ctx["queue_name"] = s.worker_queue
     ctx["db"] = Database(s)
     await ctx["db"].migrate()
 
@@ -196,5 +212,6 @@ class WorkerSettings:
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
+    queue_name = get_settings().worker_queue or "arq:queue"
     max_jobs = 4
     job_timeout = 1800

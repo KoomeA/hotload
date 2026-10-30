@@ -11,6 +11,7 @@ from redis.asyncio import Redis
 from . import ratelimit
 
 WINDOW_SECONDS = 12 * 3600
+PRIORITY_QUEUE = "hotload:priority"
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,7 @@ class Tier:
     batch_size: int
     trim_video: bool
     audio_tracks: int
+    priority: bool = False  # served by the priority worker pool
 
 
 TIERS: dict[str, Tier] = {
@@ -28,8 +30,8 @@ TIERS: dict[str, Tier] = {
     for t in (
         Tier("anonymous", 10, 20 * 60, 3, False, 1),
         Tier("free", 10, 20 * 60, 5, False, 1),
-        Tier("premium", 100, 180 * 60, 10, True, 3),
-        Tier("pro", 300, 360 * 60, 20, True, 3),
+        Tier("premium", 100, 180 * 60, 10, True, 3, True),
+        Tier("pro", 300, 360 * 60, 20, True, 3, True),
     )
 }
 

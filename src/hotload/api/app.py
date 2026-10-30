@@ -9,14 +9,31 @@ import httpx
 from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 from redis.asyncio import Redis
 from starlette.middleware.sessions import SessionMiddleware
 from zipstream import ZipStream
 
-from .. import auth, canary, compliance, engine, logging_setup, metrics, ratelimit, security, tiers
+from .. import (
+    auth,
+    canary,
+    compliance,
+    engine,
+    logging_setup,
+    metrics,
+    ratelimit,
+    security,
+    storage,
+    tiers,
+)
 from ..billing.service import BillingService, build_providers
 from ..config import Settings, get_settings
 from ..db import Database
@@ -82,6 +99,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         await app.state.db.migrate()
         app.state.sessions = auth.Sessions(secret)
         app.state.rules = RuleCache(app.state.db)
+        app.state.remote = storage.build_remote(settings)
         app.state.http = http_client or httpx.AsyncClient(follow_redirects=False)
         app.state.billing = BillingService(settings, app.state.db, build_providers(settings, app.state.http))
         settings.output_dir.mkdir(parents=True, exist_ok=True)
@@ -91,7 +109,8 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         pool = None
         if enqueue is None:
             pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
-            app.state.enqueue = lambda job_id: pool.enqueue_job("run_download", job_id)
+            app.state.enqueue = lambda job_id, queue=None: pool.enqueue_job(
+                "run_download", job_id, **({"_queue_name": queue} if queue else {}))
         else:
             app.state.enqueue = enqueue
         yield
@@ -208,6 +227,10 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         info["age_gate_required"] = info["adult"] and settings.require_age_gate
         return info
 
+    def queue_for(tier: tiers.Tier) -> str | None:
+        """Paying plans go to the priority worker pool (only when plans are enforced, i.e. the hosted service)."""
+        return tiers.PRIORITY_QUEUE if settings.quotas_enabled and tier.priority else None
+
     async def who(request: Request):
         user, key = await app.state.authenticate(request)
         return user, tiers.tier_for(user), key
@@ -267,7 +290,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         adult = precheck(url, body, tier)
         await spend_quota(request, user, tier, 1)
         job = await new_job(url, body, adult, user, tier, key=key, webhook_url=hook)
-        await app.state.enqueue(job.id)
+        await app.state.enqueue(job.id, queue_for(tier))
         return job.public()
 
     @app.post("/api/v1/playlist")
@@ -318,7 +341,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         for j in jobs:
             j.batch_id = batch.id
             await app.state.store.save(j)
-            await app.state.enqueue(j.id)
+            await app.state.enqueue(j.id, queue_for(tier))
         return batch_view(batch, jobs)
 
     def batch_view(batch, jobs):
@@ -349,12 +372,23 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         batch, jobs = await load_batch(batch_id)
         if not secrets.compare_digest(token, batch.token):
             raise HTTPException(403, "Invalid token")
-        files = [(j.path, j.filename) for j in jobs if j.state == "done" and j.path and Path(j.path).is_file()]
+        files = []  # (local path or None, storage key or None, filename)
+        for j in jobs:
+            if j.state != "done":
+                continue
+            if j.storage_key and app.state.remote:
+                files.append((None, j.storage_key, j.filename))
+            elif j.path and Path(j.path).is_file():
+                files.append((j.path, None, j.filename))
         if not files:
             raise HTTPException(404, "No finished files yet")
         zs = ZipStream(sized=False)
-        for n, (path, name) in enumerate(files, 1):
-            zs.add_path(path, arcname=f"{n:02d} - {name}")
+        for n, (path, key, name) in enumerate(files, 1):
+            arc = f"{n:02d} - {name}"
+            if path:
+                zs.add_path(path, arcname=arc)
+            else:
+                zs.add(app.state.remote.chunks(key), arcname=arc)  # streamed from the bucket, never fully in memory
         return StreamingResponse(zs, media_type="application/zip",
                                  headers={"Content-Disposition": f'attachment; filename="hotload-{batch.id}.zip"'})
 
@@ -394,6 +428,9 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         job = await load(job_id)
         if not secrets.compare_digest(token, job.token):
             raise HTTPException(403, "Invalid token")
+        if job.state == "done" and job.storage_key and app.state.remote:
+            url = await asyncio.to_thread(app.state.remote.presigned_url, job.storage_key, job.filename or "download")
+            return RedirectResponse(url, status_code=302)  # short-lived signed URL; the API never proxies the bytes
         if job.state != "done" or not job.path or not Path(job.path).is_file():
             raise HTTPException(404, "File is not available")
         return FileResponse(job.path, filename=job.filename)

@@ -51,11 +51,16 @@ Code layout (`src/hotload`):
   native-speaker review of the es/fr/de/pt/sw translations, PWA offline page, axe/Lighthouse audits in CI,
   proxying thumbnails (they currently load from the origin site and reveal the visitor's IP to it).
 
-### M3: Monetization and scale (weeks 6-10)
-- Free/Premium/Pro tiers, high-risk payment processor integration, webhooks for billing.
-- API keys, usage metering, webhooks on job completion.
-- S3/R2 storage backend, autoscaling workers, priority queues per tier.
-- Abuse tooling: admin takedown/blocklist UI, hash-list checks, audit log.
+### M3: Monetization and scale - backend implemented (see docs/PAYMENTS.md, docs/SCALING.md)
+- [x] Processor research and decision (Paystack's policy conflicts with adult/download content: needs written approval).
+- [x] Provider-agnostic billing, Paystack and BTCPay (crypto) providers, prepaid passes, verified idempotent webhooks.
+- [x] Alembic migrations (0001-0003).
+- [x] API keys, usage metering, signed job webhooks (SSRF-safe, IP-pinned).
+- [x] Abuse tooling: public reports, admin blocklist/takedown (host, URL, media id), manual plan grants.
+- [x] S3/R2 storage backend and priority queues.
+- [ ] Not live-tested: Paystack and BTCPay (tests use faithful fakes), S3 (tests use moto), priority pools under load.
+- [ ] Still open: adult-friendly card processor module (CCBill/Segpay/Verotel after quotes), refunds/chargeback handling,
+  invoices/receipts by email (needs mail provider), tax (VAT) handling, queue-depth metric, autoscaling rules.
 
 ### M4: Differentiators (10+ weeks)
 - Browser extension + bookmarklet, Telegram/Discord bot, live-stream DVR, BYO cookies (encrypted), SponsorBlock.

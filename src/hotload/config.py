@@ -30,6 +30,16 @@ class Settings(BaseSettings):
     api_rate_limit_per_minute: int = 120  # per API key
     webhook_timeout_seconds: int = 10
     webhook_max_attempts: int = 5
+    # --- storage: "local" (shared disk, default) or "s3" (AWS S3, Cloudflare R2, MinIO...) ---
+    storage_backend: str = "local"
+    s3_bucket: str | None = None
+    s3_endpoint_url: str | None = None  # R2: https://<account-id>.r2.cloudflarestorage.com
+    s3_region: str = "auto"
+    s3_access_key_id: str | None = None
+    s3_secret_access_key: str | None = None
+    s3_prefix: str = "hotload/"
+    s3_presign_seconds: int = 900
+    worker_queue: str | None = None  # arq queue this worker serves; see docs/SCALING.md
     redis_url: str = "redis://localhost:6379/0"
     data_dir: Path = Path("data")
     file_ttl_seconds: int = 3600

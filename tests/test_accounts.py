@@ -15,7 +15,7 @@ def make_client(tmp_path, monkeypatch):
     stack, enq = [], []
 
     def make(**overrides):
-        async def enqueue(job_id):
+        async def enqueue(job_id, _queue=None):
             enq.append(job_id)
 
         settings = Settings(**{"data_dir": tmp_path, "rate_limit_per_minute": 100, "secret_key": "test-secret", **overrides})

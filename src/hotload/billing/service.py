@@ -35,7 +35,8 @@ class BillingService:
         self.settings, self.db, self.providers = settings, db, providers
 
     async def start_checkout(self, user, effective_tier: str, plan_key: str, provider: str, currency: str,
-                             return_url: str) -> tuple[Payment, str]:
+                             return_base: str) -> tuple[Payment, str]:
+        """`return_base` is the page the buyer returns to; the payment id is appended so that page can look it up."""
         plan = PLANS.get(plan_key)
         if plan is None:
             raise CheckoutRefused("Unknown plan")
@@ -51,7 +52,7 @@ class BillingService:
         payment = await self.db.create_payment(user_id=user.id, provider=provider, plan=plan_key,
                                                amount_minor=amount, currency=currency)
         try:
-            checkout = await prov.create_checkout(payment, user.email, plan.label, return_url)
+            checkout = await prov.create_checkout(payment, user.email, plan.label, f"{return_base}{payment.id}")
         except ProviderError as exc:
             await self.db.close_payment(payment.id, "failed")
             log(logger, "checkout failed", logging.WARNING, payment=payment.id, provider=provider, error=str(exc))
