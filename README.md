@@ -9,6 +9,8 @@ Built on [yt-dlp](https://github.com/yt-dlp/yt-dlp) with an async job queue, a c
   separate), multi-audio-track selection, playlists and batches (ZIP), live job progress.
 - Installable PWA (share a link from your phone straight into Hotload), 6 languages, dark mode, keyboard accessible.
 - Optional accounts (email or GitHub/Google), download history and plan limits (off by default when self-hosting).
+- Also: SponsorBlock (mark or cut sponsor segments), live-stream recording, saved cookies for your own sessions
+  (encrypted), a Chromium extension and bookmarklet (`extension/`), and a Telegram bot ([docs/BOTS.md](docs/BOTS.md)).
 - Hosted-service features: prepaid Premium/Pro passes (Paystack cards/M-Pesa, crypto via BTCPay Server), API keys with
   usage metering and signed job webhooks, S3/R2 storage, priority queues, abuse reports and an admin takedown console.
   Read [docs/PAYMENTS.md](docs/PAYMENTS.md) before taking payments: processor policies matter for adult-site support.

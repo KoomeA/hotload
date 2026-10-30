@@ -20,5 +20,5 @@
 <Header />
 <main id="main">
   {@render children()}
-  <p class="muted" style="margin-top: 32px; font-size: 0.85rem">{t('footer')} · <a href="/report/">{t('report.link')}</a></p>
+  <p class="muted" style="margin-top: 32px; font-size: 0.85rem">{t('footer')} · <a href="/tools/">{t('tools.link')}</a> · <a href="/report/">{t('report.link')}</a></p>
 </main>

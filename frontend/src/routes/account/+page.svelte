@@ -1,5 +1,6 @@
 <script>
   import { onMount } from 'svelte';
+  import CookiesSection from '#lib/components/CookiesSection.svelte';
   import KeysSection from '#lib/components/KeysSection.svelte';
   import PlansSection from '#lib/components/PlansSection.svelte';
   import { ApiError, api } from '#lib/api.js';
@@ -145,6 +146,8 @@
   <PlansSection {me} onchange={load} />
 
   {#if me}<KeysSection {me} />{/if}
+
+  <CookiesSection />
 
   <section class="card">
     <h2>{t('history.title')}</h2>

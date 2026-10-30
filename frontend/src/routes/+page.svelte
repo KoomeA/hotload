@@ -5,6 +5,7 @@
   import { ApiError, api, watchJob } from '#lib/api.js';
   import { getLocale, t } from '#lib/i18n.svelte.js';
   import { isVideoInPlaylist, looksLikePlaylist, sharedUrl, urlsFromText } from '#lib/share.js';
+  import { session } from '#lib/session.svelte.js';
   import { formatTime } from '#lib/time.js';
 
   let input = $state('');
@@ -31,6 +32,11 @@
   let start = $state(0);
   let end = $state(0);
   let trimValid = $state(true);
+  let sponsorblock = $state('off');
+  let liveOn = $state(false);
+  let liveMinutes = $state(10);
+  let useCookies = $state(false);
+  let savedSites = $state([]); // domains the signed-in user has saved cookies for
   let ageOk = $state(false);
   let ageNeeded = $state(false);
 
@@ -51,6 +57,10 @@
   const finalUrls = $derived(
     mode === 'playlist' ? playlist.entries.filter((e) => picked[e.url]).map((e) => e.url) : mode === 'batch' ? urls : []
   );
+  const firstUrl = $derived(urlsFromText(input)[0] ?? '');
+  const hostOfInput = $derived((() => { try { return new URL(firstUrl).hostname; } catch { return ''; } })());
+  const cookieMatch = $derived(!!session.user && !!hostOfInput && savedSites.some((d) => hostOfInput === d || hostOfInput.endsWith('.' + d)));
+  const isYoutube = $derived(info?.site === 'Youtube');
   const working = $derived(!!job && (job.state === 'queued' || job.state === 'running'));
 
   onMount(async () => {
@@ -61,6 +71,7 @@
       submit();
     }
     api('/api/v1/presets').then((p) => (presets = p)).catch(() => {});
+    api('/api/v1/me/cookies').then((rows) => (savedSites = rows.map((r) => r.domain))).catch(() => {});
     api('/api/v1/status')
       .then((s) => (degraded = s.canary?.degraded ?? []))
       .catch(() => {});
@@ -93,6 +104,8 @@
     audioLang = '';
     subLangs = [];
     trimOn = false;
+    sponsorblock = 'off';
+    liveOn = false;
   }
 
   async function submit(event) {
@@ -108,11 +121,12 @@
       } else if (looksLikePlaylist(found[0])) {
         await loadPlaylist(found[0]);
       } else {
-        info = await api('/api/v1/extract', { method: 'POST', body: { url: found[0] } });
+        info = await api('/api/v1/extract', { method: 'POST', body: { url: found[0], use_cookies: cookieMatch && useCookies } });
         mode = 'single';
         ageNeeded = info.age_gate_required;
         end = Math.floor(info.duration ?? 0);
         start = 0;
+        liveOn = !!info.is_live && info.live_status !== 'is_upcoming';
       }
     } catch (e) {
       fail(e);
@@ -124,7 +138,7 @@
   async function loadPlaylist(url) {
     const data = await api('/api/v1/playlist', { method: 'POST', body: { url } });
     if (!data.playlist) {
-      info = await api('/api/v1/extract', { method: 'POST', body: { url } });
+      info = await api('/api/v1/extract', { method: 'POST', body: { url, use_cookies: cookieMatch && useCookies } });
       mode = 'single';
       ageNeeded = info.age_gate_required;
       end = Math.floor(info.duration ?? 0);
@@ -159,6 +173,9 @@
         subtitle_mode: isAudio || isSubsOnly ? 'file' : subMode });
     }
     if (mode === 'single' && trimOn && !isSubsOnly) Object.assign(o, { start, end });
+    if (mode === 'single' && isYoutube && sponsorblock !== 'off' && !trimOn && !isSubsOnly && !liveOn) o.sponsorblock = sponsorblock;
+    if (mode === 'single' && liveOn && !isSubsOnly) o.live_minutes = Number(liveMinutes);
+    if (cookieMatch && useCookies) o.use_cookies = true;
     return o;
   }
 
@@ -206,6 +223,9 @@
   <label for="url">{t('url.label')}</label>
   <textarea id="url" rows="2" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"
     placeholder={t('url.placeholder')} bind:value={input}></textarea>
+  {#if cookieMatch}
+    <div class="row"><label class="inline"><input type="checkbox" bind:checked={useCookies} /> {t('cookies.use')}</label></div>
+  {/if}
   <div class="row"><button type="submit" disabled={busy || !input.trim()}>{busy && mode === 'idle' ? t('fetching') : t('fetch')}</button></div>
 </form>
 
@@ -303,6 +323,42 @@
           <legend>{t('trim.title')}</legend>
           <label class="inline"><input type="checkbox" bind:checked={trimOn} /> {t('trim.enable')}</label>
           {#if trimOn}<TrimScrubber duration={Math.floor(info.duration)} bind:start bind:end bind:valid={trimValid} />{/if}
+        </fieldset>
+      {/if}
+    {/if}
+
+    {#if mode === 'single' && info}
+      {#if info.is_live || info.live_status === 'is_upcoming'}
+        <fieldset>
+          <legend>{t('live.title')}</legend>
+          {#if info.live_status === 'is_upcoming'}
+            <p class="muted">{t('live.upcoming')}</p>
+          {:else}
+            <p>{t('live.is_live')}</p>
+            <label class="inline"><input type="checkbox" bind:checked={liveOn} /> {t('live.record')}</label>
+            {#if liveOn}
+              <div class="row">
+                <div class="grow">
+                  <label for="live-min">{t('live.minutes')}</label>
+                  <input id="live-min" type="number" min="1" max="240" bind:value={liveMinutes} />
+                </div>
+              </div>
+            {/if}
+            <p class="muted" style="margin-top: 8px">{t('live.note')}</p>
+          {/if}
+        </fieldset>
+      {/if}
+
+      {#if isYoutube && !isSubsOnly && !liveOn}
+        <fieldset>
+          <legend>{t('sb.title')}</legend>
+          <label for="sb" class="sr-only">{t('sb.title')}</label>
+          <select id="sb" bind:value={sponsorblock} disabled={trimOn} aria-describedby={trimOn ? 'sb-note' : undefined}>
+            <option value="off">{t('sb.off')}</option>
+            <option value="mark">{t('sb.mark')}</option>
+            <option value="remove">{t('sb.remove')}</option>
+          </select>
+          {#if trimOn}<p id="sb-note" class="muted">{t('sb.no_trim')}</p>{/if}
         </fieldset>
       {/if}
     {/if}

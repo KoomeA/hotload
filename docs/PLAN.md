@@ -62,9 +62,12 @@ Code layout (`src/hotload`):
 - [ ] Still open: adult-friendly card processor module (CCBill/Segpay/Verotel after quotes), refunds/chargeback handling,
   invoices/receipts by email (needs mail provider), tax (VAT) handling, queue-depth metric, autoscaling rules.
 
-### M4: Differentiators (10+ weeks)
-- Browser extension + bookmarklet, Telegram/Discord bot, live-stream DVR, BYO cookies (encrypted), SponsorBlock.
-
-## Non-negotiables
-1. No DRM circumvention. 2. No long-term media storage. 3. SSRF protection on every outbound fetch.
-4. Age gate + CSAM/abuse reporting path before public launch. 5. Pin and canary every yt-dlp upgrade.
+### M4: Differentiators - implemented (see docs/COOKIES.md, docs/BOTS.md, extension/README.md)
+- [x] SponsorBlock (mark/remove), live-stream recording (FFmpeg-capped, plan-limited), encrypted saved cookies.
+- [x] Chromium extension (MV3, minimal permissions) and a drag-to-bookmarks bookmarklet; share-target already existed.
+- [x] Telegram bot (webhook, per-chat limits, 18+ confirmation, link replies).
+- [ ] Not built: Discord bot, scheduled "record at time X"/wait-for-upcoming (would pin a worker for hours), Firefox/Safari
+  extension builds and store listings, extension context-menu test (native menus cannot be driven by the test harness),
+  localised extension UI, sending files (not just links) through Telegram.
+- [ ] Not verified end to end: SponsorBlock against real YouTube segments (options and postprocessor definitions are tested,
+  the live fetch was blocked from the test environment), the Telegram bot against the real Telegram API.
