@@ -66,3 +66,32 @@ def test_summarise_languages():
     ], "subtitles": {"fr": [], "en": []}, "automatic_captions": {"de": []}}
     s = engine.summarise(info)
     assert s["audio_langs"] == ["en", "es"] and s["subtitles"] == ["en", "fr"] and s["auto_captions"] == ["de"]
+
+
+def test_sponsorblock_postprocessors_are_ordered_and_valid(tmp_path):
+    import yt_dlp
+
+    s = Settings()
+    mark = engine.build_download_opts(s, tmp_path, engine.PRESETS["mp3"], sponsorblock="mark")
+    keys = [p["key"] for p in mark["postprocessors"]]
+    assert keys[:2] == ["SponsorBlock", "ModifyChapters"] and "FFmpegExtractAudio" in keys  # before audio extraction
+    assert mark["postprocessors"][1]["remove_sponsor_segments"] == []  # mark: chapters only, nothing cut
+    rem = engine.build_download_opts(s, tmp_path, engine.PRESETS["720p"], sponsorblock="remove")
+    assert rem["postprocessors"][1]["remove_sponsor_segments"] == engine.SB_REMOVE
+    assert "intro" not in engine.SB_REMOVE and "intro" in engine.SB_MARK  # removal stays conservative
+    off = engine.build_download_opts(s, tmp_path, engine.PRESETS["720p"])
+    assert "postprocessors" not in off
+    # yt-dlp itself must accept these postprocessor definitions (catches wrong argument names)
+    for opts in (mark, rem):
+        with yt_dlp.YoutubeDL({**opts, "quiet": True}) as ydl:
+            assert ydl is not None
+
+
+def test_sponsorblock_rules(tmp_path):
+    s = Settings()
+    with pytest.raises(engine.EngineError, match="trimming or SponsorBlock"):
+        engine.build_download_opts(s, tmp_path, engine.PRESETS["720p"], sponsorblock="remove", start=1, end=9)
+    with pytest.raises(engine.EngineError):
+        engine.build_download_opts(s, tmp_path, engine.PRESETS["720p"], sponsorblock="nope")
+    only = engine.build_download_opts(s, tmp_path, engine.PRESETS["subtitles"], subtitle_langs=["en"], sponsorblock="remove")
+    assert "postprocessors" not in only or all(p["key"] != "SponsorBlock" for p in only["postprocessors"])

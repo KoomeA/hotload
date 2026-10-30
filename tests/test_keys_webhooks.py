@@ -369,3 +369,31 @@ async def test_finished_job_enqueues_a_webhook_only_when_configured(tmp_path, mo
     for j in (plain, hooked):
         await worker.run_download({"store": store, "redis": q}, j.id)
     assert q.jobs == [("deliver_webhook", (hooked.id,))]
+
+
+# --- cross-origin API use (browser extension, third-party web apps) --------------------------------------
+
+EXT = {"origin": "chrome-extension://abcdefghijklmnopabcdefghijklmnop"}
+
+
+def test_cors_preflight_allows_authorization_but_not_credentials(c):
+    r = c.options("/api/v1/jobs", headers={**EXT, "access-control-request-method": "POST",
+                                           "access-control-request-headers": "authorization,content-type"})
+    assert r.status_code == 200
+    assert r.headers["access-control-allow-origin"] == "*"
+    assert "authorization" in r.headers["access-control-allow-headers"].lower()
+    assert "access-control-allow-credentials" not in r.headers  # cookies can never ride along cross-origin
+
+
+def test_api_key_requests_work_cross_origin_but_cookie_sessions_do_not(c):
+    register(c)
+    k = new_key(c)
+    body = {"url": "https://example.com/v"}
+    keyed = c.post("/api/v1/jobs", json=body, headers={**EXT, **bearer(k["key"])})
+    assert keyed.status_code == 202 and keyed.headers["access-control-allow-origin"] == "*"
+    # the signed-in cookie plus a foreign Origin and no key is still a blocked cross-site write
+    assert c.post("/api/v1/jobs", json=body, headers=EXT).status_code == 403
+    assert c.post("/api/v1/jobs", json=body, headers={"origin": "https://evil.example"}).status_code == 403
+    # a forged key from a foreign origin gets 401, never the cookie user's access
+    forged = c.post("/api/v1/jobs", json=body, headers={**EXT, "authorization": "Bearer hl_000000000000_x"})
+    assert forged.status_code == 401

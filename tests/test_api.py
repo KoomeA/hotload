@@ -164,3 +164,11 @@ def test_batch_counts_against_rate_limit(client):
     urls = [f"https://example.com/{i}" for i in range(4)]
     assert client.post("/api/v1/batches", json={"urls": urls}).status_code == 202  # cost 4 of 5
     assert client.post("/api/v1/batches", json={"urls": urls}).status_code == 429
+
+
+def test_sponsorblock_option(client):
+    ok = client.post("/api/v1/jobs", json={"url": "https://example.com/v", "sponsorblock": "remove"})
+    assert ok.status_code == 202 and ok.json()["sponsorblock"] == "remove"
+    assert client.post("/api/v1/jobs", json={"url": "https://example.com/v", "sponsorblock": "all"}).status_code == 422
+    both = client.post("/api/v1/jobs", json={"url": "https://example.com/v", "sponsorblock": "mark", "start": 1, "end": 5})
+    assert both.status_code == 422

@@ -82,7 +82,7 @@ async def run_download(ctx: dict, job_id: str) -> None:
                     engine.PRESETS[job.preset], proxy=proxy, start=job.start, end=job.end,
                     subtitle_langs=job.subtitle_langs, subtitle_format=job.subtitle_format,
                     subtitle_mode=job.subtitle_mode, subtitle_auto=job.subtitle_auto,
-                    audio_lang=job.audio_lang, max_duration=job.max_duration,
+                    audio_lang=job.audio_lang, sponsorblock=job.sponsorblock, max_duration=job.max_duration,
                     block_adult=settings.require_age_gate and not job.age_confirmed,
                     blocked_media=blocked_media, progress=on_progress,
                 )

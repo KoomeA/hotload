@@ -30,6 +30,7 @@ class Job:
     subtitle_mode: str = "file"
     subtitle_auto: bool = False
     audio_lang: str | None = None
+    sponsorblock: str = "off"
     max_duration: int | None = None
     site: str | None = None
     user_id: str | None = None

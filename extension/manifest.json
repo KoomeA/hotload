@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Hotload",
+  "version": "0.1.0",
+  "description": "Send the page you are on to your Hotload server: open it, or download it with one click.",
+  "minimum_chrome_version": "110",
+  "permissions": ["activeTab", "contextMenus", "storage"],
+  "action": { "default_title": "Hotload", "default_popup": "popup.html" },
+  "options_ui": { "page": "options.html", "open_in_tab": true },
+  "background": { "service_worker": "background.js", "type": "module" },
+  "icons": { "16": "icons/16.png", "48": "icons/48.png", "128": "icons/128.png" },
+  "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'self'" }
+}

@@ -83,6 +83,10 @@ PRESETS: dict[str, Preset] = {
 
 
 LANG_RE = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,2}$")
+SPONSORBLOCK_MODES = ("off", "mark", "remove")
+# Conservative defaults: "remove" cuts only clearly promotional segments; "mark" adds chapters for the rest too.
+SB_REMOVE = ["sponsor", "selfpromo", "interaction"]
+SB_MARK = ["sponsor", "selfpromo", "interaction", "intro", "outro", "preview", "music_offtopic"]
 SUBTITLE_FORMATS = ("srt", "vtt")
 SUBTITLE_MODES = ("embed", "file")
 
@@ -179,6 +183,7 @@ def build_download_opts(
     subtitle_mode: str = "file",
     subtitle_auto: bool = False,
     audio_lang: str | None = None,
+    sponsorblock: str = "off",
     max_duration: int | None = None,
     block_adult: bool = False,
     blocked_media: frozenset[str] = frozenset(),
@@ -213,6 +218,20 @@ def build_download_opts(
         else:
             opts["subtitlesformat"] = f"{subtitle_format}/best"
             pps.append({"key": "FFmpegSubtitlesConvertor", "format": subtitle_format, "when": "before_dl"})
+    if sponsorblock not in SPONSORBLOCK_MODES:
+        raise EngineError("Unsupported SponsorBlock option")
+    if sponsorblock != "off" and not preset.subs_only:
+        if start is not None or end is not None:
+            raise EngineError("Choose either trimming or SponsorBlock, not both")
+        cats = SB_REMOVE if sponsorblock == "remove" else SB_MARK
+        # SponsorBlock only knows YouTube; on other sites these steps do nothing. They must run before audio extraction.
+        pps = [
+            {"key": "SponsorBlock", "categories": cats, "when": "after_filter"},
+            {"key": "ModifyChapters", "remove_sponsor_segments": cats if sponsorblock == "remove" else [],
+             "remove_chapters_patterns": [], "remove_ranges": [], "force_keyframes": False,
+             "sponsorblock_chapter_title": "[SponsorBlock]: %(category_names)l"},
+            *pps,
+        ]
     if pps:
         opts["postprocessors"] = pps
     if (start is not None or end is not None) and not preset.subs_only:

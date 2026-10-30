@@ -9,6 +9,7 @@ import httpx
 from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     FileResponse,
     JSONResponse,
@@ -60,6 +61,7 @@ class JobOptions(BaseModel):
     subtitle_mode: Literal["embed", "file"] = "file"
     subtitle_auto: bool = False
     audio_lang: str | None = None
+    sponsorblock: Literal["off", "mark", "remove"] = "off"
     age_confirmed: bool = False
     webhook_url: str | None = Field(default=None, max_length=2048)  # API keys only: signed POST when the job finishes
 
@@ -67,6 +69,8 @@ class JobOptions(BaseModel):
     def _check(self):
         if self.start is not None and self.end is not None and self.end <= self.start:
             raise ValueError("end must be greater than start")
+        if self.sponsorblock != "off" and (self.start is not None or self.end is not None):
+            raise ValueError("Choose either trimming or SponsorBlock, not both")
         for code in [*self.subtitle_langs, *([self.audio_lang] if self.audio_lang else [])]:
             engine.validate_lang(code)
         return self
@@ -126,6 +130,12 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
     app.add_middleware(SessionMiddleware, secret_key=secret, session_cookie="hl_oauth", same_site="lax",
                        https_only=settings.cookie_secure, max_age=600)
 
+    # CORS for API clients (browser extensions, third-party web apps). Credentials are NOT allowed, so browsers never
+    # attach cookies to cross-origin calls: only Authorization-header API keys work cross-origin.
+    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False,
+                       allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+                       allow_headers=["authorization", "content-type"], max_age=600)
+
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
         response = await call_next(request)
@@ -139,7 +149,10 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
 
     @app.middleware("http")
     async def same_origin(request: Request, call_next):
-        if request.method not in ("GET", "HEAD", "OPTIONS") and not origin_allowed(request, settings):
+        # Requests that authenticate with an API key carry no ambient cookie, so there is nothing for a hostile
+        # site to ride on: the CSRF origin check only protects cookie sessions.
+        keyed = request.headers.get("authorization", "").lower().startswith("bearer hl_")
+        if request.method not in ("GET", "HEAD", "OPTIONS") and not keyed and not origin_allowed(request, settings):
             return JSONResponse({"detail": "Cross-site request blocked"}, status_code=403)
         return await call_next(request)
 
@@ -277,7 +290,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         job = await app.state.store.create(
             url=url, preset=o.preset, start=o.start, end=o.end, subtitle_langs=o.subtitle_langs,
             subtitle_format=o.subtitle_format, subtitle_mode=o.subtitle_mode, subtitle_auto=o.subtitle_auto,
-            audio_lang=o.audio_lang, adult=adult, age_confirmed=o.age_confirmed, batch_id=batch_id,
+            audio_lang=o.audio_lang, sponsorblock=o.sponsorblock, adult=adult, age_confirmed=o.age_confirmed, batch_id=batch_id,
             user_id=user.id if user else None, key_id=key.id if key else None, webhook_url=webhook_url,
             max_duration=tier.max_duration if settings.quotas_enabled else None,
         )
