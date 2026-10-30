@@ -116,6 +116,22 @@ def check(s: Settings, which: Callable[[str], str | None] = shutil.which) -> lis
         if cur.upper() not in ("USD", "KES", "NGN", "GHS", "ZAR"):
             add(INFO, "payments", f"prices set for {cur.upper()}: Paystack will not offer it (subunit handling unconfirmed); BTCPay will.")
 
+    # --- email
+    if s.smtp_host and not s.mail_enabled:
+        add(WARN, "email", "SMTP is half configured: HOTLOAD_SMTP_HOST, HOTLOAD_MAIL_FROM and an https HOTLOAD_PUBLIC_URL are all required; mail stays off.")
+    elif s.mail_enabled:
+        add(OK, "email", "email verification and password reset are on.")
+        if s.smtp_security == "none" and s.smtp_host not in ("localhost", "127.0.0.1", "::1"):
+            add(FAIL if hosted else WARN, "email", "SMTP without TLS to a remote host: tokens and passwords-reset links would cross the network in clear text.")
+        if s.smtp_user and not s.smtp_password:
+            add(WARN, "email", "HOTLOAD_SMTP_USER is set without HOTLOAD_SMTP_PASSWORD.")
+        if hosted and not s.require_verified_email:
+            add(INFO, "email", "HOTLOAD_REQUIRE_VERIFIED_EMAIL is off: unverified accounts can still buy plans and create API keys.")
+    elif hosted:
+        add(WARN, "email", "no mail provider: password reset is unavailable and addresses cannot be verified (docs/ACCOUNTS.md).")
+    if s.require_verified_email and not s.mail_enabled:
+        add(FAIL, "email", "HOTLOAD_REQUIRE_VERIFIED_EMAIL is on but mail is not configured: nobody could ever verify, so nobody could buy.")
+
     # --- optional features
     if s.cookie_key:
         add(WARN, "cookies-vault", "saved cookies are on: keep HOTLOAD_COOKIE_KEY in a secret manager, apart from database backups (docs/COOKIES.md).")
@@ -125,8 +141,8 @@ def check(s: Settings, which: Callable[[str], str | None] = shutil.which) -> lis
         add(INFO, "oauth", "OAuth is on: register callbacks at <PUBLIC_URL>/api/v1/auth/oauth/<provider>/callback and test live.")
 
     # --- known gaps that are not configuration (so the checklist is honest)
-    if hosted and s.registration_open:
-        add(WARN, "accounts", "registration is open and email is not verified (no mail provider yet): free accounts can be farmed, passwords cannot be reset.")
+    if hosted and s.registration_open and not s.require_verified_email:
+        add(WARN, "accounts", "registration is open and email verification is not enforced: free accounts can be farmed.")
     return f
 
 

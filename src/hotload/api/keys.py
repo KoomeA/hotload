@@ -74,6 +74,8 @@ def add_key_routes(app: FastAPI, settings: Settings) -> None:
         user = await session_user(request)
         if settings.quotas_enabled and tiers.effective_name(user) != "pro":
             raise HTTPException(403, "API keys need an active Pro plan")
+        if settings.require_verified_email and not user.email_verified:
+            raise HTTPException(403, "Confirm your email address first")
         if len(await app.state.db.list_keys(user.id)) >= MAX_KEYS:
             raise HTTPException(409, f"At most {MAX_KEYS} active keys")
         full, key_id, secret_hash, webhook_secret = auth.new_api_key()

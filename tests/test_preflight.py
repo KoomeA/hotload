@@ -61,3 +61,23 @@ def test_cli_exit_status_and_json(monkeypatch, capsys):
     monkeypatch.setattr(preflight.shutil, "which", HAVE_ALL)
     assert preflight.main(["--json"]) == 0
     assert isinstance(json.loads(capsys.readouterr().out), list)
+
+
+MAIL = dict(smtp_host="smtp.example", mail_from="Hotload <no-reply@hotload.example>")
+
+
+def test_email_checks():
+    on = check(Settings(**GOOD_HOSTED, **MAIL), HAVE_ALL)
+    assert OK in levels(on, "email") and FAIL not in levels(on, "email")
+    half = check(Settings(**{**GOOD_HOSTED, "public_url": None}, smtp_host="smtp.example"), HAVE_ALL)
+    assert WARN in levels(half, "email")  # configured host but mail cannot turn on
+    plain = check(Settings(**GOOD_HOSTED, **MAIL, smtp_security="none"), HAVE_ALL)
+    assert FAIL in levels(plain, "email")  # clear-text SMTP to a remote host, hosted
+    local = check(Settings(**{**GOOD_HOSTED}, smtp_host="localhost", mail_from="a@hotload.example", smtp_security="none"), HAVE_ALL)
+    assert FAIL not in levels(local, "email")  # a local relay is fine
+    stuck = check(Settings(**GOOD_HOSTED, require_verified_email=True), HAVE_ALL)
+    assert FAIL in levels(stuck, "email")  # nobody could ever verify
+
+
+def test_hosted_without_a_mail_provider_is_warned():
+    assert WARN in levels(check(Settings(**GOOD_HOSTED), HAVE_ALL), "email")

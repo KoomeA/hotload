@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -12,6 +13,14 @@ class Settings(BaseSettings):
     public_url: str | None = None  # e.g. https://hotload.example (OAuth callbacks, same-origin check)
     cookie_secure: bool | None = None  # None = secure whenever public_url is https (recommended); set explicitly to override
     registration_open: bool = True
+    # --- email (verification and password reset). Off until smtp_host, mail_from and public_url are all set. ---
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    smtp_security: Literal["starttls", "ssl", "none"] = "starttls"  # ssl = implicit TLS (port 465); none only for a local relay
+    mail_from: str | None = None  # e.g. "Hotload <no-reply@hotload.example>"
+    require_verified_email: bool = False  # hosted: unverified password accounts cannot buy plans or create API keys
     quotas_enabled: bool = False  # self-host default: unlimited. The hosted service turns this on.
     allowed_origins: list[str] = []  # extra Origins allowed to make state-changing requests (e.g. extensions)
     github_client_id: str | None = None
@@ -82,6 +91,11 @@ class Settings(BaseSettings):
     trust_proxy_headers: bool = False  # honour X-Forwarded-For (set behind a reverse proxy)
     trusted_proxy_hops: int = 1  # reverse proxies in front of the app; the client IP is the Nth entry from the RIGHT
     ffmpeg_location: str | None = None
+
+    @property
+    def mail_enabled(self) -> bool:
+        # Links in mail are built from public_url, never from the request's Host header (which an attacker controls).
+        return bool(self.smtp_host and self.mail_from and self.public_url)
 
     @property
     def secure_cookies(self) -> bool:

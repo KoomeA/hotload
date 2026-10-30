@@ -31,6 +31,7 @@ from .. import (
     compliance,
     engine,
     logging_setup,
+    mail,
     metrics,
     ratelimit,
     security,
@@ -100,8 +101,8 @@ class PlaylistRequest(BaseModel):
 
 
 def create_app(settings: Settings | None = None, redis: Redis | None = None, enqueue=None,
-               http_client: httpx.AsyncClient | None = None) -> FastAPI:
-    """App factory. `redis`, `enqueue` and `http_client` (payment providers) are injectable for tests."""
+               http_client: httpx.AsyncClient | None = None, mailer=None) -> FastAPI:
+    """App factory. `redis`, `enqueue`, `http_client` (payment providers) and `mailer` are injectable for tests."""
     settings = settings or get_settings()
     if settings.quotas_enabled and not settings.secret_key:
         # Hosted mode with a random per-process secret means sessions and OAuth state break across replicas/restarts.
@@ -116,6 +117,8 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         app.state.db = Database(settings)
         await app.state.db.migrate()
         app.state.sessions = auth.Sessions(secret)
+        app.state.tokens = auth.Tokens(secret)
+        app.state.mailer = mailer or mail.build(settings)
         app.state.rules = RuleCache(app.state.db)
         app.state.vault = CookieVault(settings, app.state.db)
         app.state.remote = storage.build_remote(settings)

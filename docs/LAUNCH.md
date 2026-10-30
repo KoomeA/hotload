@@ -23,7 +23,7 @@ contradicted things I had told you earlier. They are listed here so nobody relie
 | Sessions not revocable; login limits too coarse; tokens in URLs/logs; job status leaked tokens | Med | Fixed (session epoch, 3-layer limits, redaction, owner-only status) |
 | Thumbnails disclosed the visitor's IP to arbitrary hosts | Med | Fixed: signed same-origin proxy, CSP `img-src 'self'` |
 | Service worker never served the offline shell | Low | Fixed (verified offline in a browser) |
-| Registered emails can be enumerated (409 on register) | Low | **Open, accepted** until email verification exists |
+| Registered emails can be enumerated (409 on register) | Low | **Open, accepted**: sign-up says the address is taken. Password reset does not leak it. |
 | Bookmarklet sends the full page URL (incl. query) to your server | Low | Open: user-initiated, documented |
 | `?url=` links auto-fetch (forced server-side fetch on the visitor's quota) | Low | Open, accepted (needed for share target / extension) |
 
@@ -54,7 +54,7 @@ Things that **only you / a staging environment can verify**. I could not do them
 - [ ] Confirm YouTube and the other top sites work from your production egress IPs (datacentre IPs get blocked); budget proxies.
 
 **Product gaps to decide on**
-- [ ] **Email verification and password reset** (needs a mail provider). Until then: open registration is farmable and lost passwords are unrecoverable.
+- [ ] **Email**: set the `HOTLOAD_SMTP_*` variables and `HOTLOAD_MAIL_FROM` (code is built and tested against a local sink; docs/ACCOUNTS.md), send a real test message, set SPF/DKIM/DMARC, then consider `HOTLOAD_REQUIRE_VERIFIED_EMAIL=true`.
 - [ ] Refund/chargeback handling is manual (held payments, provider dashboards). Decide who does it and how fast.
 - [ ] Native-speaker review of the es/fr/de/pt/sw translations.
 
@@ -70,6 +70,7 @@ HOTLOAD_TRUST_PROXY_HEADERS=true  HOTLOAD_TRUSTED_PROXY_HOPS=1   # = proxies in 
 HOTLOAD_METRICS_TOKEN=<random>
 HOTLOAD_EGRESS_FILTERED=true                       # only after the filter is proven (section 2)
 HOTLOAD_COOKIE_KEY=<python -m hotload.admin cookie-key>   # only if you offer saved cookies
+HOTLOAD_SMTP_HOST=smtp.example  HOTLOAD_SMTP_USER=...  HOTLOAD_SMTP_PASSWORD=...  HOTLOAD_MAIL_FROM='Hotload <no-reply@your.domain>'
 ```
 Then: `python -m hotload.preflight` must report **0 failures**, and every warning should be one you have chosen to accept.
 

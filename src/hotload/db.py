@@ -49,6 +49,7 @@ class User(Base):
     tier_expires: Mapped[float | None] = mapped_column(Float, nullable=True)  # None = never (manual grants)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)  # set only from the server CLI, never by email
     session_epoch: Mapped[int] = mapped_column(Integer, default=0)  # bump to revoke every existing session
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False)  # True once the owner proved the mailbox (link or OAuth)
     oauth_provider: Mapped[str | None] = mapped_column(String(16), nullable=True)
     oauth_sub: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created: Mapped[float] = mapped_column(Float, default=time.time)
@@ -218,13 +219,30 @@ class Database:
     async def link_oauth(self, user_id: str, provider: str, sub: str) -> None:
         async with self.session() as s:
             user = await s.get(User, user_id)
-            user.oauth_provider, user.oauth_sub = provider, sub
+            user.oauth_provider, user.oauth_sub, user.email_verified = provider, sub, True
             await s.commit()
 
     async def bump_epoch(self, user_id: str) -> None:
         async with self.session() as s:
             await s.execute(update(User).where(User.id == user_id).values(session_epoch=User.session_epoch + 1))
             await s.commit()
+
+    async def mark_email_verified(self, user_id: str, email: str) -> bool:
+        """Verify only if the account still has the address the link was sent to (the address cannot change today,
+        but the check keeps a stale link from verifying a different one if it ever can)."""
+        async with self.session() as s:
+            res = await s.execute(update(User).where(User.id == user_id, User.email == email).values(email_verified=True))
+            await s.commit()
+            return bool(res.rowcount)
+
+    async def reset_password(self, user_id: str, old_hash: str | None, new_hash: str) -> bool:
+        """Set a new password only if the hash is still the one the reset link was issued against (single use), end every
+        session, and count the address as verified: the person just proved they can read its mail."""
+        async with self.session() as s, s.begin():
+            cond = [User.id == user_id] + ([User.password_hash == old_hash] if old_hash else [User.password_hash.is_(None)])
+            res = await s.execute(update(User).where(*cond).values(
+                password_hash=new_hash, email_verified=True, session_epoch=User.session_epoch + 1))
+            return bool(res.rowcount)
 
     async def take_over_for_oauth(self, user_id: str, provider: str, sub: str) -> None:
         """First verified provider login for an account that was created with a password.
@@ -235,7 +253,7 @@ class Database:
         """
         async with self.session() as s, s.begin():
             await s.execute(update(User).where(User.id == user_id).values(
-                oauth_provider=provider, oauth_sub=sub, password_hash=None, session_epoch=User.session_epoch + 1))
+                oauth_provider=provider, oauth_sub=sub, password_hash=None, email_verified=True, session_epoch=User.session_epoch + 1))
             await s.execute(delete(ApiKey).where(ApiKey.user_id == user_id))
             await s.execute(delete(UserCookie).where(UserCookie.user_id == user_id))
 

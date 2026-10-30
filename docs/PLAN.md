@@ -52,7 +52,8 @@ Code layout (`src/hotload`):
   multi-audio-track selection, playlist expansion and batches with a streamed ZIP.
 - [x] Accounts (email+password, GitHub/Google), history, plan limits (see docs/ACCOUNTS.md).
 - [x] Offline app shell (service worker) and signed thumbnail proxy (the browser never contacts the origin site).
-- [ ] Still open: email verification and password reset (needs a mail provider), live OAuth test,
+- [x] Email verification and password reset (SMTP; browser-tested against a local sink, not a real provider).
+- [ ] Still open: live OAuth test, a real SMTP run (+ SPF/DKIM/DMARC),
   native-speaker review of the es/fr/de/pt/sw translations, axe/Lighthouse audits in CI.
 
 ### M3: Monetization and scale - backend implemented (see docs/PAYMENTS.md, docs/SCALING.md)
@@ -80,4 +81,4 @@ Code layout (`src/hotload`):
 - [x] Four independent security reviews; every finding verified, fixed with regression tests, or recorded as accepted.
 - [x] `python -m hotload.preflight` checks a deployment's configuration; drafts of Terms/Privacy/DMCA/Refund in docs/legal.
 - [ ] Gates only you can pass: legal review, payment-processor decisions, staging with the hardened Compose overlay (never run),
-  real Paystack/BTCPay/S3/OAuth/Telegram runs, email verification and password reset, load testing (none done).
+  real Paystack/BTCPay/S3/OAuth/Telegram/SMTP runs, load testing (none done).

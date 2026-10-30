@@ -47,6 +47,8 @@ def add_billing_routes(app: FastAPI, settings: Settings, client_ip) -> None:
     @app.post("/api/v1/billing/checkout", status_code=201)
     async def checkout(body: CheckoutRequest, request: Request):
         user = await require_user(request)
+        if settings.require_verified_email and not user.email_verified:
+            raise HTTPException(403, "Confirm your email address first")
         if not await ratelimit.allow(app.state.redis, f"checkout:{user.id}", 6, 3600):
             raise HTTPException(429, "Too many checkout attempts, try again later")
         base = (settings.public_url or str(request.base_url)).rstrip("/")
