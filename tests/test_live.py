@@ -23,7 +23,8 @@ needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg req
 def test_live_options_let_ffmpeg_enforce_the_cap(tmp_path):
     o = engine.build_download_opts(Settings(), tmp_path, engine.PRESETS["best_mp4"], live_seconds=90)
     assert o["external_downloader"] == {"default": "ffmpeg"}
-    assert o["external_downloader_args"]["ffmpeg"] == ["-t", "90"] and "-rw_timeout" in o["external_downloader_args"]["ffmpeg_i"]
+    assert o["external_downloader_args"]["ffmpeg"][:2] == ["-t", "90"] and "-fs" in o["external_downloader_args"]["ffmpeg"]
+    assert "-rw_timeout" in o["external_downloader_args"]["ffmpeg_i"] and "-protocol_whitelist" in o["external_downloader_args"]["ffmpeg_i"]
     assert "external_downloader" not in engine.build_download_opts(Settings(), tmp_path, engine.PRESETS["best_mp4"])
 
 
@@ -117,7 +118,7 @@ def test_self_host_cap_and_validation(make):
 
 
 def test_recording_is_a_paid_feature_with_plan_caps_when_enforced(make):
-    c = make(quotas_enabled=True)
+    c = make(quotas_enabled=True, egress_filtered=True)
     assert job(c).status_code == 403  # anonymous
     c.post("/api/v1/auth/register", json={"email": "r@example.com", "password": "correct horse battery"})
     uid = c.get("/api/v1/me").json()["id"]

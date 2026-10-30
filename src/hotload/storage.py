@@ -50,6 +50,9 @@ class S3Storage:
 
         self.bucket = settings.s3_bucket or ""
         self.prefix = settings.s3_prefix
+        if not self.prefix.strip("/"):
+            # cleanup_expired deletes every object older than the TTL under this prefix: an empty one would wipe a shared bucket
+            raise ValueError("HOTLOAD_S3_PREFIX must not be empty")
         self.presign_seconds = settings.s3_presign_seconds
         self.client = client or boto3.client(
             "s3", endpoint_url=settings.s3_endpoint_url, region_name=settings.s3_region,

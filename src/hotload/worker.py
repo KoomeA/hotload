@@ -105,7 +105,7 @@ async def _run_download(ctx: dict, job, cookie_path) -> None:
                     subtitle_langs=job.subtitle_langs, subtitle_format=job.subtitle_format,
                     subtitle_mode=job.subtitle_mode, subtitle_auto=job.subtitle_auto,
                     audio_lang=job.audio_lang, sponsorblock=job.sponsorblock, live_seconds=job.live_seconds,
-                    max_duration=job.max_duration,
+                    max_duration=job.max_duration, max_filesize=job.max_filesize,
                     block_adult=settings.require_age_gate and not job.age_confirmed,
                     blocked_media=blocked_media, progress=on_progress,
                 )

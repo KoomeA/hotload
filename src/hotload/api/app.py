@@ -2,6 +2,7 @@ import asyncio
 import ipaddress
 import json
 import secrets
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -117,6 +118,10 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         app.state.rules = RuleCache(app.state.db)
         app.state.vault = CookieVault(settings, app.state.db)
         app.state.remote = storage.build_remote(settings)
+        # Metadata fetches run on their own small pool, so a hostile site that stalls them can never starve the
+        # rest of the API (name checks, payments, polling) of threads.
+        app.state.extract_pool = ThreadPoolExecutor(max_workers=settings.max_concurrent_extractions, thread_name_prefix="extract")
+        app.state.extract_slots = asyncio.Semaphore(settings.max_concurrent_extractions)
         app.state.http = http_client or httpx.AsyncClient(follow_redirects=False)
         app.state.billing = BillingService(settings, app.state.db, build_providers(settings, app.state.http))
         settings.output_dir.mkdir(parents=True, exist_ok=True)
@@ -133,6 +138,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         yield
         if pool:
             await pool.aclose()
+        app.state.extract_pool.shutdown(wait=False, cancel_futures=True)
         if http_client is None:
             await app.state.http.aclose()
         await app.state.db.dispose()
@@ -202,6 +208,17 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
             raise HTTPException(451, "This content is not available")
         return clean
 
+    async def run_extract(fn, *args):
+        """Run a blocking metadata fetch on the bounded pool; shed load with 503 instead of queueing without limit."""
+        try:
+            await asyncio.wait_for(app.state.extract_slots.acquire(), settings.extract_queue_seconds)
+        except TimeoutError:
+            raise HTTPException(503, "The server is busy fetching other links. Try again in a moment.") from None
+        try:
+            return await asyncio.get_running_loop().run_in_executor(app.state.extract_pool, fn, *args)
+        finally:
+            app.state.extract_slots.release()
+
     def extract_with_retries(url: str, cookiefile=None) -> dict:
         """Blocking: try up to `max_attempts` egress routes, rotating proxies on retryable failures."""
         pool: ProxyPool = app.state.pool
@@ -260,9 +277,9 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
             if body.use_cookies:
                 await require_cookie_access(user, url)
                 async with app.state.vault.file_for(user.id, url) as cookie_path:
-                    info = await asyncio.to_thread(extract_with_retries, url, cookie_path)
+                    info = await run_extract(extract_with_retries, url, cookie_path)
             else:
-                info = await asyncio.to_thread(extract_with_retries, url)
+                info = await run_extract(extract_with_retries, url)
         except engine.EngineError as exc:
             await metrics.inc(app.state.redis, "hotload_extract_total", result="error")
             raise HTTPException(503 if exc.retryable else 422, str(exc)) from exc
@@ -313,6 +330,9 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
             if (o.start is not None or o.end is not None) and not preset.audio_codec and not preset.subs_only \
                     and not tier.trim_video:
                 raise HTTPException(403, "Trimming video needs a Premium plan (audio trimming is free)")
+        if (o.start is not None or o.end is not None or o.live_minutes) and settings.quotas_enabled and not settings.egress_filtered:
+            # FFmpeg does its own networking, which only the network-layer egress filter can constrain (docs/LAUNCH.md).
+            raise HTTPException(503, "Trimming and live recording are temporarily unavailable")
         try:
             return compliance.enforce_age_gate(url, None, o.age_confirmed, settings.require_age_gate)
         except compliance.AgeGateRequired as exc:
@@ -343,6 +363,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
             audio_lang=o.audio_lang, sponsorblock=o.sponsorblock, use_cookies=o.use_cookies, live_seconds=o.live_minutes * 60 if o.live_minutes else None, adult=adult, age_confirmed=o.age_confirmed, batch_id=batch_id,
             user_id=user.id if user else None, key_id=key.id if key else None, webhook_url=webhook_url,
             max_duration=tier.max_duration if settings.quotas_enabled else None,
+            max_filesize=tier.max_filesize_mb * 1024 * 1024 if settings.quotas_enabled else None,
         )
         if user:
             await app.state.db.add_history(user.id, job)
@@ -367,7 +388,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         _, _, key = await who(request)
         url = await guard(request, body.url, key=key)
         try:
-            data = await asyncio.to_thread(
+            data = await run_extract(
                 lambda: engine.extract_playlist(url, settings, app.state.pool.select(url), settings.max_playlist_entries))
         except (engine.EngineError, NoProxyAvailable) as exc:
             raise HTTPException(422, str(exc)) from exc

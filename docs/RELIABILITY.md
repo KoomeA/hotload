@@ -31,15 +31,30 @@ error ratio `rate(hotload_jobs_total{state="error"}) / rate(hotload_jobs_total) 
 - **Rollback:** redeploy the previous image tag (or revert the bump PR). Watch the canaries for 15 minutes after each deploy.
 - Hot-fixing one site without a release: use a yt-dlp plugin (`yt_dlp_plugins/`) rather than forking.
 
-## Containment
-- In-process guard (`engine.SafeYoutubeDL`): every request yt-dlp makes, and the media URL handed to FFmpeg for trims,
-  must resolve to a public address and not be blocklisted. Limitation: FFmpeg follows redirects itself and DNS can change
-  between check and use (rebinding).
-- Network guard (`deploy/docker-compose.hardened.yml` + `deploy/egress/squid.conf`): worker is on an internal-only network
-  and reaches the internet only through a proxy that denies private/metadata ranges. Caveat: with upstream proxies
-  configured the worker bypasses it; enforce the deny-list at the provider or host firewall.
-- Worker container: read-only root, `cap_drop: ALL`, `no-new-privileges`, non-root user. Still to do: CPU/memory/pids
-  limits per deployment, and a seccomp profile.
+## Containment (corrected after the launch review)
+The first version of this section claimed the in-process guard covered redirects. **It did not**: it validated only the
+first URL, and yt-dlp follows redirects (and re-resolves names) internally. That was reproduced and fixed. What protects you
+now, and what each layer can and cannot do:
+
+| Layer | Stops | Cannot see |
+|---|---|---|
+| `security.validate_url` on every submitted URL | blocklist, allowlist, private literals/names, bad ports, NAT64/6to4/Teredo forms | anything after the first hop |
+| `netguard` connect-time guard (yt-dlp threads only) | **redirects to internal addresses, DNS rebinding, literal IPs**, for yt-dlp's own HTTP | FFmpeg, upstream proxies, other processes |
+| `SafeYoutubeDL.dl` | every URL FFmpeg receives (video+audio inputs, `requested_formats`, `manifest_url`); non-http(s) schemes refused | what FFmpeg does after it starts |
+| FFmpeg `-protocol_whitelist http,https,tcp,tls,crypto` | `file:`, `ftp:`, `rtsp:`, `concat:` references inside manifests | HTTP redirects FFmpeg follows itself |
+| **Egress filter** (`deploy/docker-compose.hardened.yml`, `deploy/egress/squid.conf`) | everything that leaves through the proxy, including FFmpeg's redirects and manifest references | traffic that bypasses the proxy (see below) |
+
+- **FFmpeg-based features (trimming, live recording) are only safe behind the egress filter.** On the hosted service they
+  stay off (503) until you set `HOTLOAD_EGRESS_FILTERED=true`, which is your statement that the workers really are behind it.
+- **Upstream proxies resolve target names themselves.** With `HOTLOAD_PROXY_URLS`, neither the in-process guard nor the egress
+  filter sees the final destination: enforce a private-range deny list at the provider or the host firewall.
+- Exemption for configured proxies is by exact host **and port**, and the `no_proxy` list is never treated as a proxy.
+- Metadata fetches are bounded: a wall-clock deadline and a byte cap (`HOTLOAD_EXTRACT_DEADLINE_SECONDS`, `..._MAX_BYTES`)
+  on their own bounded thread pool (`HOTLOAD_MAX_CONCURRENT_EXTRACTIONS`) that answers 503 when busy.
+- Downloads are bounded by plan: `max_filesize` (per plan), a running byte count that aborts lying servers, FFmpeg `-t`/`-fs`,
+  one item per URL (no playlist fan-out), and a post-download duration check (`ffprobe`) for sites that report no duration.
+- Containers: read-only root, `cap_drop: ALL`, `no-new-privileges`, non-root user, and memory/CPU/PID limits. Not yet:
+  a seccomp profile and per-job disk quotas (use a size-limited volume for `/data` and monitor it).
 
 ## Logs
 JSON lines on stdout. Job events carry `job`, `url` (12-char hash), `state`, `seconds`, `attempts`, `adult`.

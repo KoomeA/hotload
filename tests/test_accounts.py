@@ -155,7 +155,7 @@ def test_batch_cost_counts_and_plan_batch_size(make_client):
 
 
 def test_video_trim_needs_premium_audio_trim_is_free(make_client):
-    c = make_client(quotas_enabled=True)
+    c = make_client(quotas_enabled=True, egress_filtered=True)
     video = {"url": "https://example.com/a", "preset": "720p", "start": 1, "end": 5}
     assert c.post("/api/v1/jobs", json=video).status_code == 403
     assert c.post("/api/v1/jobs", json={**video, "preset": "mp3"}).status_code == 202

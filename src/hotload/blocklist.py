@@ -10,15 +10,27 @@ from urllib.parse import urlsplit, urlunsplit
 KINDS = ("host", "url", "media")
 
 
+def _idna(host: str) -> str:
+    """Compare hosts in punycode, so a takedown for bücher.de also matches xn--bcher-kva.de (and vice versa)."""
+    host = host.lower().strip(".")
+    try:
+        return host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return host
+
+
 def normalise_url(url: str) -> str:
     p = urlsplit(url.strip())
-    return urlunsplit((p.scheme.lower(), p.netloc.lower(), p.path.rstrip("/") or "/", p.query, ""))
+    netloc = p.netloc.lower()
+    if p.hostname:
+        netloc = netloc.replace(p.hostname.lower(), _idna(p.hostname), 1)
+    return urlunsplit((p.scheme.lower(), netloc, p.path.rstrip("/") or "/", p.query, ""))
 
 
 def normalise_value(kind: str, value: str) -> str:
     value = value.strip()
     if kind == "host":
-        return (urlsplit(value).hostname if "//" in value else value).lower().strip(".")
+        return _idna(urlsplit(value).hostname if "//" in value else value)
     if kind == "url":
         return normalise_url(value)
     return value
@@ -34,7 +46,7 @@ class Blocklist:
 
     def blocks_url(self, url: str) -> bool:
         p = urlsplit(url)
-        host = (p.hostname or "").lower().strip(".")
+        host = _idna(p.hostname or "")
         if any(host == h or host.endswith("." + h) for h in self.hosts):
             return True
         return normalise_url(url) in self.urls

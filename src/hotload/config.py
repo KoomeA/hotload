@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     max_attempts: int = 3
     max_batch_size: int = 20
     max_playlist_entries: int = 50
+    egress_filtered: bool = False  # operator confirms workers sit behind the egress filter (docs/LAUNCH.md)
+    extract_deadline_seconds: int = 60  # wall-clock cap for fetching a page's metadata
+    extract_max_bytes: int = 20 * 1024 * 1024  # most bytes read while extracting metadata (pages, manifests)
+    max_concurrent_extractions: int = 8  # the API runs at most this many metadata fetches at once
+    extract_queue_seconds: float = 5.0  # how long a request waits for a free slot before getting 503
     allow_private_targets: bool = False  # tests/dev only: disables the outbound SSRF guard
     canary_enabled: bool = True
     canary_file: Path | None = None  # JSON file replacing the built-in canary list (e.g. adult sites)

@@ -16,9 +16,22 @@ def _host_matches(host: str, patterns: list[str]) -> bool:
     return any(host == p.lower() or host.endswith("." + p.lower()) for p in patterns)
 
 
-def _is_public_ip(ip: str) -> bool:
-    addr = ipaddress.ip_address(ip)
+# Ranges `is_global` still calls global but that embed or tunnel to other (possibly internal) IPv4 addresses.
+_EMBEDDED = tuple(ipaddress.ip_network(n) for n in ("64:ff9b::/96", "64:ff9b:1::/48", "2002::/16", "2001::/32"))
+
+
+def is_public_ip(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip.split("%")[0])
+    except ValueError:
+        return False
+    if addr.version == 6 and (addr.ipv4_mapped is not None or any(addr in net for net in _EMBEDDED)):
+        embedded = addr.ipv4_mapped
+        return embedded is not None and is_public_ip(str(embedded))  # NAT64/6to4/Teredo can reach internal IPv4: refuse
     return addr.is_global and not addr.is_multicast
+
+
+_is_public_ip = is_public_ip
 
 
 def validate_url(url: str, settings: Settings, resolve=None, enforce_allowlist: bool = True) -> str:
@@ -32,6 +45,10 @@ def validate_url(url: str, settings: Settings, resolve=None, enforce_allowlist: 
     parts = urlsplit(url.strip())
     if parts.scheme not in ("http", "https"):
         raise UnsafeURL("Only http and https URLs are allowed")
+    try:
+        parts.port  # noqa: B018 - raises ValueError for http://host:99999/ or http://host:abc/
+    except ValueError as exc:
+        raise UnsafeURL("Invalid port") from exc
     if not parts.hostname or parts.username or parts.password:
         raise UnsafeURL("Invalid host or embedded credentials")
     host = parts.hostname
@@ -39,7 +56,9 @@ def validate_url(url: str, settings: Settings, resolve=None, enforce_allowlist: 
         raise UnsafeURL("This site is blocked")
     if enforce_allowlist and settings.allowed_hosts and not _host_matches(host, settings.allowed_hosts):
         raise UnsafeURL("This site is not allowed")
-    resolve = resolve or socket.getaddrinfo  # looked up at call time, so tests can substitute a resolver
+    # Looked up at call time (tests substitute a resolver). The connect-time guard is deliberately bypassed here: this
+    # function makes its own, clearer, decision and reports it.
+    resolve = resolve or getattr(socket.getaddrinfo, "_unguarded", socket.getaddrinfo)
     try:
         literal = ipaddress.ip_address(host)
     except ValueError:

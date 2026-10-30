@@ -36,7 +36,9 @@ Code layout (`src/hotload`):
 ### M1: Reliability (weeks 2-3) - implemented, see docs/RELIABILITY.md
 - [x] Canary monitor (extract + media probe, degraded-site status, CLI gate), cron in worker.
 - [x] Proxy pool: per-site routing, rotation, cooldown, retry on retryable failures.
-- [x] Outbound SSRF guard in the engine (covers redirects yt-dlp follows and FFmpeg trim URLs) + egress-filter overlay.
+- [x] Outbound SSRF protection, in layers (CORRECTED after the launch review: the first version only validated the
+  first URL and did NOT stop redirects or DNS rebinding): pre-check of every URL, a connect-time address guard for yt-dlp's
+  own traffic (`netguard`), validation of every URL handed to FFmpeg, and a network-layer egress filter overlay for FFmpeg.
 - [x] Metrics (`/metrics`, Prometheus text) and structured JSON logs.
 - [x] yt-dlp pinned (`constraints.txt`) with a daily bump PR gated by tests + canary.
 - [ ] Still open: per-container resource limits/seccomp, FFmpeg wall-clock timeouts, canary run from the deployed

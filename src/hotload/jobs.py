@@ -35,6 +35,7 @@ class Job:
     live_seconds: int | None = None
     notify: dict | None = None  # {"kind": "telegram", "chat_id": 123}: tell the requester when done
     max_duration: int | None = None
+    max_filesize: int | None = None
     site: str | None = None
     user_id: str | None = None
     batch_id: str | None = None
@@ -46,7 +47,7 @@ class Job:
 
     def public(self) -> dict:
         d = asdict(self)
-        for hidden in ("path", "token", "url", "age_confirmed", "user_id", "max_duration", "key_id", "webhook_url", "storage_key", "notify"):
+        for hidden in ("path", "token", "url", "age_confirmed", "user_id", "max_duration", "max_filesize", "key_id", "webhook_url", "storage_key", "notify"):
             d.pop(hidden)
         d["download_url"] = f"/api/v1/jobs/{self.id}/file?token={self.token}" if self.state == "done" else None
         return d

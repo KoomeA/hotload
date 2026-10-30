@@ -214,7 +214,7 @@ def test_pin_resolves_once_and_connects_to_the_validated_ip():
         return [(2, 1, 6, "", (PUBLIC_IP if len(calls) == 1 else "10.0.0.5", port))]
 
     target, host = webhooks._pin("https://hooks.example.com:8443/in?x=1", Settings(), rebinding)
-    assert target == f"https://{PUBLIC_IP}:8443/in?x=1" and host == "hooks.example.com" and len(calls) == 1
+    assert target == f"https://{PUBLIC_IP}:8443/in?x=1" and host == "hooks.example.com:8443" and len(calls) == 1  # Host keeps the port
 
 
 def test_pin_refuses_private_answers_even_if_one_is_public():
@@ -247,6 +247,7 @@ async def test_delivery_goes_to_the_pinned_ip_with_host_sni_and_signature():
     assert await send(r) == 200
     req = r.requests[0]
     assert req.url.host == PUBLIC_IP and req.headers["host"] == "hooks.example.com"
+    assert req.headers["host"] != PUBLIC_IP
     assert req.extensions["sni_hostname"] == "hooks.example.com"
     assert req.headers["x-hotload-signature"].startswith("sha256=") and req.method == "POST"
 

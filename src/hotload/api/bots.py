@@ -64,7 +64,8 @@ def add_bot_routes(app: FastAPI, settings: Settings) -> None:
         return (await redis().get(f"hotload:tg:preset:{chat_id}")) or DEFAULT_PRESET
 
     async def request_download(chat_id: int, url: str, preset: str) -> None:
-        if not await ratelimit.allow(redis(), f"tg:{chat_id}", 10, 60):
+        if not await ratelimit.allow(redis(), f"tg:{chat_id}", 10, 60) or not await ratelimit.allow(redis(), "tgglobal", 300, 60):
+            # per chat, plus one bot-wide cap so many throwaway accounts cannot add up to unlimited work
             return await say(chat_id, "Slow down a little, then send the link again.")
         try:
             clean = await asyncio.to_thread(security.validate_url, url, settings)

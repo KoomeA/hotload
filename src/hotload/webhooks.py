@@ -56,7 +56,8 @@ def _pin(url: str, settings: Settings, resolve=None) -> tuple[str, str]:
     netloc = f"[{ip}]" if ":" in ip else ip
     if parts.port:
         netloc += f":{parts.port}"
-    return urlunsplit((parts.scheme, netloc, parts.path or "/", parts.query, "")), parts.hostname
+    host_header = parts.hostname + (f":{parts.port}" if parts.port else "")  # what the receiver expects to see
+    return urlunsplit((parts.scheme, netloc, parts.path or "/", parts.query, "")), host_header
 
 
 async def deliver(url: str, body: bytes, headers: dict, settings: Settings, client: httpx.AsyncClient,
@@ -68,7 +69,7 @@ async def deliver(url: str, body: bytes, headers: dict, settings: Settings, clie
         raise WebhookError(f"unsafe destination: {exc}", retryable=False) from exc
     try:
         async with client.stream("POST", target, content=body, headers={**headers, "host": host}, follow_redirects=False,
-                                 timeout=settings.webhook_timeout_seconds, extensions={"sni_hostname": host}) as r:
+                                 timeout=settings.webhook_timeout_seconds, extensions={"sni_hostname": host.split(":")[0]}) as r:
             status = r.status_code  # the body is deliberately never read
     except httpx.HTTPError as exc:
         raise WebhookError(f"delivery failed: {type(exc).__name__}", retryable=True) from exc
