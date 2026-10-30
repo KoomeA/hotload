@@ -1,0 +1,26 @@
+[
+  {
+    "name": "archive-org",
+    "site": "archive.org",
+    "url": "https://archive.org/details/BigBuckBunny_124",
+    "min_formats": 1
+  },
+  {
+    "name": "direct-mp4",
+    "site": "generic",
+    "url": "https://archive.org/download/BigBuckBunny_124/Content/big_buck_bunny_720p_surround.mp4",
+    "min_formats": 1
+  },
+  {
+    "name": "youtube",
+    "site": "youtube",
+    "url": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+    "min_formats": 2
+  },
+  {
+    "name": "dailymotion",
+    "site": "dailymotion",
+    "url": "https://www.dailymotion.com/video/x2jvvep",
+    "min_formats": 1
+  }
+]

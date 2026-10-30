@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hotload</title>
+<style>
+  :root { --bg:#fff; --fg:#14161a; --muted:#5b6370; --card:#f4f5f7; --line:#dfe2e8; --accent:#e5484d; --accent-fg:#fff; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#101215; --fg:#eceef2; --muted:#9aa3b2; --card:#1a1d22; --line:#2b3038; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui, sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 48px 16px; }
+  h1 { margin: 0 0 4px; font-size: 2rem; } h1 span { color: var(--accent); }
+  p.sub { margin: 0 0 24px; color: var(--muted); }
+  form, .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; align-items:center; }
+  input[type=url], input[type=text], select { flex:1; min-width:0; padding:10px 12px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--fg); font:inherit; }
+  input.t { max-width: 110px; flex: none; }
+  button { padding:10px 18px; border:0; border-radius:8px; background:var(--accent); color:var(--accent-fg); font:inherit; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  label { color: var(--muted); font-size: .9rem; }
+  .card { margin-top:16px; display:none; } .card.show { display:block; }
+  .meta { display:flex; gap:12px; } .meta img { width:120px; height:68px; object-fit:cover; border-radius:6px; background:var(--line); }
+  .meta h2 { margin:0; font-size:1rem; } .meta small { color:var(--muted); }
+  progress { width:100%; height:10px; margin-top:12px; }
+  .err { color: var(--accent); } a.dl { display:inline-block; margin-top:12px; color:var(--accent); font-weight:600; }
+  footer { margin-top:32px; color:var(--muted); font-size:.85rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Hot<span>load</span></h1>
+  <p class="sub">Paste a link. Pick a format. Download.</p>
+  <form id="f">
+    <div class="row"><input id="url" type="url" required placeholder="https://..." aria-label="Video URL" autofocus>
+      <button id="go">Fetch</button></div>
+  </form>
+  <section id="info" class="card" aria-live="polite">
+    <div class="meta"><img id="thumb" alt=""><div><h2 id="title"></h2><small id="sub"></small></div></div>
+    <div class="row"><select id="preset" aria-label="Format"></select></div>
+    <div class="row"><label>Trim (seconds, optional)</label>
+      <input class="t" id="start" type="text" inputmode="decimal" placeholder="start" aria-label="Start second">
+      <input class="t" id="end" type="text" inputmode="decimal" placeholder="end" aria-label="End second"></div>
+    <div class="row" id="ageRow" hidden><label><input type="checkbox" id="age"> I confirm I am 18 or older and allowed to view this content.</label></div>
+    <div class="row"><button id="dl">Download</button></div>
+    <progress id="bar" max="100" value="0" hidden></progress>
+    <div id="status" class="sub"></div>
+  </section>
+  <p id="error" class="err" role="alert"></p>
+  <p id="degraded" class="sub" role="status" hidden></p>
+  <footer>Only download content you have the right to download. Files are deleted after one hour.</footer>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let adultRequired = false;
+function fail(m) { $('error').textContent = m || ''; }
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(typeof body.detail === 'string' ? body.detail : 'Request failed (' + r.status + ')');
+  return body;
+}
+const fmt = s => s == null ? '' : Math.floor(s/60) + ':' + String(Math.floor(s%60)).padStart(2,'0');
+api('/api/v1/status').then(s => { const d = s.canary && s.canary.degraded; if (d && d.length) { $('degraded').hidden = false; $('degraded').textContent = 'Some sites are having trouble right now (' + d.join(', ') + '). Downloads from them may fail.'; } }).catch(() => {});
+api('/api/v1/presets').then(ps => { $('preset').innerHTML = ps.map(p => `<option value="${p.key}">${p.label}</option>`).join(''); });
+$('f').addEventListener('submit', async e => {
+  e.preventDefault(); fail(); $('go').disabled = true; $('info').classList.remove('show');
+  try {
+    const i = await api('/api/v1/extract', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({url: $('url').value})});
+    $('title').textContent = i.title || 'Untitled'; $('thumb').src = i.thumbnail || '';
+    $('sub').textContent = [i.site, i.uploader, fmt(i.duration)].filter(Boolean).join(' · ');
+    adultRequired = i.age_gate_required; $('ageRow').hidden = !adultRequired;
+    $('bar').hidden = true; $('status').textContent = ''; $('info').classList.add('show');
+  } catch (err) { fail(err.message); } finally { $('go').disabled = false; }
+});
+$('dl').addEventListener('click', async () => {
+  fail();
+  if (adultRequired && !$('age').checked) return fail('Please confirm you are 18 or older.');
+  const num = v => v.trim() === '' ? null : Number(v);
+  $('dl').disabled = true; $('bar').hidden = false; $('bar').value = 0; $('status').textContent = 'Queued…';
+  try {
+    const job = await api('/api/v1/jobs', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({
+      url: $('url').value, preset: $('preset').value, start: num($('start').value), end: num($('end').value), age_confirmed: $('age').checked})});
+    const es = new EventSource(`/api/v1/jobs/${job.id}/events`);
+    es.onmessage = ev => {
+      const j = JSON.parse(ev.data); $('bar').value = j.progress; $('status').textContent = j.message || j.state;
+      if (j.state === 'done') {
+        es.close();
+        const a = document.createElement('a'); a.className = 'dl'; a.href = j.download_url; a.download = ''; a.textContent = 'Save ' + j.filename;  // textContent: never HTML
+        $('status').replaceChildren(a); $('dl').disabled = false;
+      }
+      if (j.state === 'error') { es.close(); fail(j.message); $('dl').disabled = false; }
+    };
+    es.onerror = () => { es.close(); $('dl').disabled = false; };
+  } catch (err) { fail(err.message); $('dl').disabled = false; }
+});
+</script>
+</body>
+</html>

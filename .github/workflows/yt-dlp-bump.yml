@@ -1,0 +1,41 @@
+name: Bump yt-dlp
+# Extractors break constantly; this keeps the pinned engine fresh. A PR is opened (never merged
+# automatically) only when the new version passes the tests and the canary gate.
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Find latest yt-dlp
+        id: v
+        run: |
+          latest=$(pip index versions yt-dlp 2>/dev/null | head -1 | sed -E 's/.*\(([^)]+)\).*/\1/')
+          current=$(sed -E 's/yt-dlp==//' constraints.txt)
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+      - name: Test candidate
+        if: steps.v.outputs.latest != steps.v.outputs.current
+        run: |
+          echo "yt-dlp==${{ steps.v.outputs.latest }}" > constraints.txt
+          pip install -c constraints.txt -e ".[dev]"
+          ruff check src tests
+          pytest -q
+          python -m hotload.canary --min-success 0.6
+      - name: Open PR
+        if: steps.v.outputs.latest != steps.v.outputs.current
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: bot/yt-dlp-${{ steps.v.outputs.latest }}
+          title: "Bump yt-dlp ${{ steps.v.outputs.current }} -> ${{ steps.v.outputs.latest }}"
+          commit-message: "Bump yt-dlp to ${{ steps.v.outputs.latest }}"
+          body: "Automated bump. Tests and the canary gate (>= 60% of sites) passed on a GitHub runner. Datacentre IPs are often blocked by some sites, so also check the staging canary before deploying."

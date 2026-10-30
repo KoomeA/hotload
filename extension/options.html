@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="styles.css" />
+  <title>Hotload settings</title>
+</head>
+<body class="options">
+  <h1>Hot<span>load</span> settings</h1>
+  <form id="form">
+    <label for="server">Your Hotload server</label>
+    <input id="server" type="text" placeholder="https://hotload.example" autocomplete="off" spellcheck="false" />
+    <p class="muted">Plain http is only accepted for localhost, so API keys never travel unencrypted.</p>
+
+    <label for="key">API key (optional, Pro plan)</label>
+    <input id="key" type="password" placeholder="hl_…" autocomplete="off" spellcheck="false" />
+    <p class="muted">Enables one-click downloads from the toolbar. Stored on this device only (not synced).</p>
+
+    <label for="preset">Default quick-download format</label>
+    <select id="preset"></select>
+
+    <div class="row"><button type="submit">Save</button><button type="button" id="test" class="secondary">Test connection</button></div>
+    <p id="msg" role="status" aria-live="polite"></p>
+  </form>
+  <script type="module" src="options.js"></script>
+</body>
+</html>

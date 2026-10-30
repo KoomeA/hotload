@@ -1,0 +1,72 @@
+# Production overlay. NOT RUN in the environment this repository was developed in (no container runtime there):
+# test it on a staging host before relying on it. Use with:
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.hardened.yml --profile hosted up -d
+# Set HOTLOAD_DOMAIN, and in .env: HOTLOAD_PUBLIC_URL=https://<domain>, HOTLOAD_EGRESS_FILTERED=true (only after the
+# egress filter below is confirmed to work; it unlocks trimming and live recording on the hosted service).
+#
+# What it does
+#   * edge (Caddy): the only service with a published port; terminates TLS and sets X-Forwarded-For to the real client
+#     address, so HOTLOAD_TRUSTED_PROXY_HOPS=1 is correct.
+#   * api, worker, worker-priority, redis: on an INTERNAL network with no route to the internet. Their only way out is the
+#     filtering proxy (egress/squid.conf), which refuses private, loopback, link-local, CGNAT and NAT64 ranges and any port
+#     except 80/443. This is what constrains FFmpeg (its own sockets, its own redirects) and anything the in-process
+#     guard cannot see. Both lower- and upper-case proxy variables are set: FFmpeg reads the lower-case ones.
+#
+# Things you must still do
+#   * Pin the squid image to a tag or digest you have tested (the line below uses a floating tag on purpose so it cannot
+#     be wrong here; do not ship it floating).
+#   * If your database or BTCPay Server is on a private address, add its host to NO_PROXY below, or the proxy (correctly)
+#     refuses to reach it.
+#   * HOTLOAD_PROXY_URLS (upstream residential proxies) are reached THROUGH this filter only if the provider is reachable
+#     on a public address; the upstream provider resolves target names itself, so also enforce a private-range deny list
+#     there or at the host firewall.
+x-egress-env: &egress-env
+  HTTP_PROXY: http://egress:3128
+  HTTPS_PROXY: http://egress:3128
+  http_proxy: http://egress:3128
+  https_proxy: http://egress:3128
+  NO_PROXY: redis,egress,api,localhost,127.0.0.1
+  no_proxy: redis,egress,api,localhost,127.0.0.1
+
+services:
+  edge:
+    image: caddy:2
+    ports: ["80:80", "443:443"]
+    environment:
+      HOTLOAD_DOMAIN: ${HOTLOAD_DOMAIN:?set HOTLOAD_DOMAIN}
+    command: ["caddy", "reverse-proxy", "--from", "${HOTLOAD_DOMAIN}", "--to", "api:8000"]
+    networks: [internal, internet]
+    depends_on: [api]
+    restart: unless-stopped
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+  egress:
+    image: ubuntu/squid:latest
+    volumes: ["./egress/squid.conf:/etc/squid/squid.conf:ro"]
+    networks: [internal, internet]
+    restart: unless-stopped
+  api:
+    ports: !reset []
+    environment:
+      <<: *egress-env
+      HOTLOAD_TRUST_PROXY_HEADERS: "true"
+      HOTLOAD_TRUSTED_PROXY_HOPS: "1"
+    networks: [internal]
+    depends_on: [egress]
+  worker:
+    environment: *egress-env
+    networks: [internal]
+    depends_on: [egress]
+  worker-priority:
+    environment:
+      <<: *egress-env
+      HOTLOAD_WORKER_QUEUE: hotload:priority
+    networks: [internal]
+    depends_on: [egress]
+  redis:
+    networks: [internal]
+networks:
+  internal:
+    internal: true
+  internet: {}
