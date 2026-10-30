@@ -3,6 +3,7 @@
 Billing (M3) only has to set `users.tier`; enforcement already reads it.
 """
 
+import time
 from dataclasses import dataclass
 
 from redis.asyncio import Redis
@@ -33,8 +34,18 @@ TIERS: dict[str, Tier] = {
 }
 
 
+def effective_name(user, now: float | None = None) -> str:
+    """The plan a user is on right now: a paid plan whose period ended counts as free."""
+    if user is None:
+        return "anonymous"
+    expires = getattr(user, "tier_expires", None)
+    if user.tier not in ("free", "anonymous") and expires is not None and expires <= (now or time.time()):
+        return "free"
+    return user.tier or "free"
+
+
 def tier_for(user) -> Tier:
-    return TIERS.get(getattr(user, "tier", None) or "anonymous", TIERS["anonymous"])
+    return TIERS.get(effective_name(user), TIERS["free"] if user else TIERS["anonymous"])
 
 
 def subject(user, ip: str) -> str:
@@ -42,8 +53,6 @@ def subject(user, ip: str) -> str:
 
 
 async def used(redis: Redis, who: str) -> int:
-    import time
-
     key = f"hotload:rl:quota:{who}:{int(time.time()) // WINDOW_SECONDS}"
     return int(await redis.get(key) or 0)
 

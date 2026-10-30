@@ -143,7 +143,7 @@ async def startup(ctx: dict) -> None:
     ctx["store"] = JobStore(ctx["redis_client"], s.job_ttl_seconds)
     s.data_dir.mkdir(parents=True, exist_ok=True)
     ctx["db"] = Database(s)
-    await ctx["db"].create_all()
+    await ctx["db"].migrate()
 
 
 async def shutdown(ctx: dict) -> None:

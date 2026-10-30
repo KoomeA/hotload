@@ -53,7 +53,9 @@ def add_account_routes(app: FastAPI, settings: Settings, client_ip) -> None:
 
     def view(user) -> dict:
         t = tiers.tier_for(user)
-        return {"id": user.id, "email": user.email, "tier": user.tier, "has_password": bool(user.password_hash),
+        return {"id": user.id, "email": user.email, "tier": tiers.effective_name(user),
+                "tier_expires": user.tier_expires if tiers.effective_name(user) != "free" else None,
+                "has_password": bool(user.password_hash),
                 "provider": user.oauth_provider, "limits": _limits(t)}
 
     def _limits(t: tiers.Tier) -> dict:

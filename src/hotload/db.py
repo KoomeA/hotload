@@ -1,9 +1,20 @@
 """Users and download history (SQLAlchemy 2, async). SQLite by default, PostgreSQL for the hosted service."""
 
+import asyncio
 import secrets
 import time
 
-from sqlalchemy import Float, Index, String, UniqueConstraint, delete, select
+from sqlalchemy import (
+    Boolean,
+    Float,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    delete,
+    select,
+    update,
+)
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -33,6 +44,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     tier: Mapped[str] = mapped_column(String(16), default="free")
+    tier_expires: Mapped[float | None] = mapped_column(Float, nullable=True)  # None = never (manual grants)
     oauth_provider: Mapped[str | None] = mapped_column(String(16), nullable=True)
     oauth_sub: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created: Mapped[float] = mapped_column(Float, default=time.time)
@@ -56,14 +68,95 @@ class HistoryEntry(Base):
                 "preset": self.preset, "state": self.state, "created": self.created}
 
 
+class Payment(Base):
+    """One checkout attempt. `id` is our reference, sent to the provider and echoed back in its webhook."""
+
+    __tablename__ = "payments"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(String(32), index=True)
+    provider: Mapped[str] = mapped_column(String(16))
+    plan: Mapped[str] = mapped_column(String(24))
+    amount_minor: Mapped[int] = mapped_column(Integer)
+    currency: Mapped[str] = mapped_column(String(3))
+    status: Mapped[str] = mapped_column(String(10), default="pending")  # pending | paid | failed | expired
+    provider_ref: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    created: Mapped[float] = mapped_column(Float, default=time.time)
+    paid_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    def public(self) -> dict:
+        return {"id": self.id, "provider": self.provider, "plan": self.plan, "amount_minor": self.amount_minor,
+                "currency": self.currency, "status": self.status, "created": self.created, "paid_at": self.paid_at}
+
+
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True, default=lambda: secrets.token_hex(6))
+    user_id: Mapped[str] = mapped_column(String(32), index=True)
+    name: Mapped[str] = mapped_column(String(64))
+    key_hash: Mapped[str] = mapped_column(String(64), unique=True)  # sha256 of the secret (high entropy)
+    webhook_secret: Mapped[str] = mapped_column(String(64))  # signs job-completion webhooks (server must know it)
+    created: Mapped[float] = mapped_column(Float, default=time.time)
+    last_used: Mapped[float | None] = mapped_column(Float, nullable=True)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    def public(self) -> dict:
+        return {"id": self.id, "name": self.name, "created": self.created, "last_used": self.last_used,
+                "revoked": self.revoked}
+
+
+class BlockedItem(Base):
+    """Admin blocklist: a whole host (and its subdomains) or one exact URL."""
+
+    __tablename__ = "blocklist"
+    __table_args__ = (UniqueConstraint("kind", "value"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(8))  # host | url
+    value: Mapped[str] = mapped_column(String(2048))
+    reason: Mapped[str] = mapped_column(String(200), default="")
+    created: Mapped[float] = mapped_column(Float, default=time.time)
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    def public(self) -> dict:
+        return {"id": self.id, "kind": self.kind, "value": self.value, "reason": self.reason, "created": self.created}
+
+
+class Report(Base):
+    """Abuse/DMCA report from the public form; admins action or reject it."""
+
+    __tablename__ = "reports"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    url: Mapped[str] = mapped_column(String(2048))
+    kind: Mapped[str] = mapped_column(String(12))  # copyright | abuse | csam | other
+    contact: Mapped[str] = mapped_column(String(320))
+    details: Mapped[str] = mapped_column(String(2000), default="")
+    status: Mapped[str] = mapped_column(String(10), default="open")  # open | actioned | rejected
+    created: Mapped[float] = mapped_column(Float, default=time.time)
+    resolved: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    def public(self) -> dict:
+        return {"id": self.id, "url": self.url, "kind": self.kind, "contact": self.contact, "details": self.details,
+                "status": self.status, "created": self.created, "resolved": self.resolved}
+
+
 class Database:
     def __init__(self, settings: Settings):
         self.engine: AsyncEngine = create_async_engine(settings.db_url)
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
 
     async def create_all(self) -> None:
+        """Create tables directly from the models (tests/dev). Production uses `migrate()`."""
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+
+    async def migrate(self) -> None:
+        """Bring the schema to the latest Alembic revision (safe on new and on pre-Alembic databases)."""
+        from .migrations import upgrade
+
+        await asyncio.to_thread(upgrade, str(self.engine.url.render_as_string(hide_password=False)))
 
     async def dispose(self) -> None:
         await self.engine.dispose()
@@ -92,12 +185,6 @@ class Database:
             await s.commit()
             return user
 
-    async def set_tier(self, user_id: str, tier: str) -> None:
-        async with self.session() as s:
-            user = await s.get(User, user_id)
-            user.tier = tier
-            await s.commit()
-
     async def link_oauth(self, user_id: str, provider: str, sub: str) -> None:
         async with self.session() as s:
             user = await s.get(User, user_id)
@@ -108,6 +195,67 @@ class Database:
         async with self.session() as s:
             await s.execute(delete(HistoryEntry).where(HistoryEntry.user_id == user_id))
             await s.execute(delete(User).where(User.id == user_id))
+            await s.commit()
+
+    # --- payments
+    async def create_payment(self, **kwargs) -> Payment:
+        async with self.session() as s:
+            payment = Payment(**kwargs)
+            s.add(payment)
+            await s.commit()
+            return payment
+
+    async def get_payment(self, payment_id: str) -> Payment | None:
+        async with self.session() as s:
+            return await s.get(Payment, payment_id)
+
+    async def payment_by_provider_ref(self, provider: str, ref: str) -> Payment | None:
+        async with self.session() as s:
+            q = select(Payment).where(Payment.provider == provider, Payment.provider_ref == ref)
+            return (await s.execute(q)).scalar_one_or_none()
+
+    async def list_payments(self, user_id: str, limit: int = 20) -> list[dict]:
+        async with self.session() as s:
+            q = select(Payment).where(Payment.user_id == user_id).order_by(Payment.created.desc()).limit(limit)
+            return [p.public() for p in (await s.execute(q)).scalars()]
+
+    async def set_provider_ref(self, payment_id: str, ref: str | None) -> None:
+        async with self.session() as s:
+            await s.execute(update(Payment).where(Payment.id == payment_id).values(provider_ref=ref))
+            await s.commit()
+
+    async def close_payment(self, payment_id: str, status: str) -> bool:
+        """pending -> failed/expired. Never touches a payment that already settled."""
+        async with self.session() as s:
+            res = await s.execute(update(Payment).where(Payment.id == payment_id, Payment.status == "pending")
+                                  .values(status=status))
+            await s.commit()
+            return res.rowcount == 1
+
+    async def complete_payment(self, payment_id: str, now: float | None = None) -> bool:
+        """Mark a payment paid and grant its plan in ONE transaction.
+
+        Only the pending -> paid transition grants anything, so retried or duplicated webhooks cannot extend a
+        plan twice, and a crash cannot leave a payment paid without its entitlement.
+        """
+        from .billing.catalog import PLANS, entitlement_after
+
+        now = now or time.time()
+        async with self.session() as s, s.begin():
+            res = await s.execute(update(Payment).where(Payment.id == payment_id, Payment.status == "pending")
+                                  .values(status="paid", paid_at=now))
+            if res.rowcount != 1:
+                return False
+            payment = await s.get(Payment, payment_id)
+            user = await s.get(User, payment.user_id)
+            tier, expires = entitlement_after(user.tier, user.tier_expires, PLANS[payment.plan], now)
+            user.tier, user.tier_expires = tier, expires
+            return True
+
+    async def set_tier(self, user_id: str, tier: str, expires: float | None = None) -> None:
+        async with self.session() as s:
+            user = await s.get(User, user_id)
+            user.tier, user.tier_expires = tier, expires
             await s.commit()
 
     # --- history

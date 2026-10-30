@@ -19,6 +19,14 @@ class Settings(BaseSettings):
     google_client_id: str | None = None
     google_client_secret: str | None = None
     web_dir: Path | None = None  # built frontend (frontend/build); default: bundled fallback page
+    # --- billing (all optional; a provider is enabled when its credentials are set) ---
+    prices: dict[str, dict[str, int]] = {}  # {"KES": {"premium_30": 129900}} in minor units; merged over the USD defaults
+    paystack_secret_key: str | None = None
+    paystack_base_url: str = "https://api.paystack.co"
+    btcpay_url: str | None = None  # e.g. https://btcpay.example.com
+    btcpay_store_id: str | None = None
+    btcpay_api_key: str | None = None
+    btcpay_webhook_secret: str | None = None
     redis_url: str = "redis://localhost:6379/0"
     data_dir: Path = Path("data")
     file_ttl_seconds: int = 3600

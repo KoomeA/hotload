@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
+import httpx
 from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -16,11 +17,13 @@ from starlette.middleware.sessions import SessionMiddleware
 from zipstream import ZipStream
 
 from .. import auth, canary, compliance, engine, logging_setup, metrics, ratelimit, security, tiers
+from ..billing.service import BillingService, build_providers
 from ..config import Settings, get_settings
 from ..db import Database
 from ..jobs import BatchStore, JobStore
 from ..proxies import NoProxyAvailable, ProxyPool
 from .accounts import add_account_routes, origin_allowed
+from .billing import add_billing_routes
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -61,8 +64,9 @@ class PlaylistRequest(BaseModel):
     url: str
 
 
-def create_app(settings: Settings | None = None, redis: Redis | None = None, enqueue=None) -> FastAPI:
-    """App factory. `redis` and `enqueue` are injectable for tests."""
+def create_app(settings: Settings | None = None, redis: Redis | None = None, enqueue=None,
+               http_client: httpx.AsyncClient | None = None) -> FastAPI:
+    """App factory. `redis`, `enqueue` and `http_client` (payment providers) are injectable for tests."""
     settings = settings or get_settings()
     secret = settings.secret_key or secrets.token_urlsafe(48)  # per-process if unset: sessions reset on restart
 
@@ -72,8 +76,10 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         app.state.pool = ProxyPool.from_settings(settings)
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         app.state.db = Database(settings)
-        await app.state.db.create_all()
+        await app.state.db.migrate()
         app.state.sessions = auth.Sessions(secret)
+        app.state.http = http_client or httpx.AsyncClient(follow_redirects=False)
+        app.state.billing = BillingService(settings, app.state.db, build_providers(settings, app.state.http))
         settings.output_dir.mkdir(parents=True, exist_ok=True)
         app.state.redis = redis or Redis.from_url(settings.redis_url, decode_responses=True)
         app.state.store = JobStore(app.state.redis, settings.job_ttl_seconds)
@@ -87,6 +93,8 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         yield
         if pool:
             await pool.aclose()
+        if http_client is None:
+            await app.state.http.aclose()
         await app.state.db.dispose()
         if redis is None:
             await app.state.redis.aclose()
@@ -358,6 +366,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         return FileResponse(job.path, filename=job.filename)
 
     add_account_routes(app, settings, client_ip)
+    add_billing_routes(app, settings, client_ip)
 
     web_dir = settings.web_dir or WEB_DIR
     if web_dir.exists():
