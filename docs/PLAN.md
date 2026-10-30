@@ -41,22 +41,24 @@ Code layout (`src/hotload`):
   own traffic (`netguard`), validation of every URL handed to FFmpeg, and a network-layer egress filter overlay for FFmpeg.
 - [x] Metrics (`/metrics`, Prometheus text) and structured JSON logs.
 - [x] yt-dlp pinned (`constraints.txt`) with a daily bump PR gated by tests + canary.
-- [ ] Still open: per-container resource limits/seccomp, FFmpeg wall-clock timeouts, canary run from the deployed
-  environment in CI, alert rules shipped as code, S3-shared proxy health.
+- [x] Containers: memory/CPU/pids limits, `cap_drop: ALL`, `no-new-privileges`, read-only API filesystem (Docker's default seccomp profile applies).
+- [x] Wall-clock bounds: download watchdog, FFmpeg `-t`/`-rw_timeout`, and the worker's job timeout (5400 s) as the backstop.
+- [ ] Still open: a custom seccomp profile, a dedicated wall-clock timeout for post-processing FFmpeg (only the job timeout covers it),
+  canary run from the deployed environment in CI, alert rules shipped as code, S3-shared proxy health.
 
 ### M2: Product (weeks 3-6) - implemented
 - [x] SvelteKit PWA (static build served by the API): share target, installable, 6 languages, dark mode, a11y basics.
 - [x] Trim scrubber (audio and video), subtitles (SRT/VTT, embedded or separate, auto-captions, subtitles-only),
   multi-audio-track selection, playlist expansion and batches with a streamed ZIP.
 - [x] Accounts (email+password, GitHub/Google), history, plan limits (see docs/ACCOUNTS.md).
-- [ ] Still open: email verification and password reset (needs a mail provider), Alembic migrations, live OAuth test,
-  native-speaker review of the es/fr/de/pt/sw translations, PWA offline page, axe/Lighthouse audits in CI,
-  proxying thumbnails (they currently load from the origin site and reveal the visitor's IP to it).
+- [x] Offline app shell (service worker) and signed thumbnail proxy (the browser never contacts the origin site).
+- [ ] Still open: email verification and password reset (needs a mail provider), live OAuth test,
+  native-speaker review of the es/fr/de/pt/sw translations, axe/Lighthouse audits in CI.
 
 ### M3: Monetization and scale - backend implemented (see docs/PAYMENTS.md, docs/SCALING.md)
 - [x] Processor research and decision (Paystack's policy conflicts with adult/download content: needs written approval).
 - [x] Provider-agnostic billing, Paystack and BTCPay (crypto) providers, prepaid passes, verified idempotent webhooks.
-- [x] Alembic migrations (0001-0003).
+- [x] Alembic migrations (0001-0005).
 - [x] API keys, usage metering, signed job webhooks (SSRF-safe, IP-pinned).
 - [x] Abuse tooling: public reports, admin blocklist/takedown (host, URL, media id), manual plan grants.
 - [x] S3/R2 storage backend and priority queues.
