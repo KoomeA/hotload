@@ -7,3 +7,6 @@ __pycache__/
 *.egg-info/
 /data/
 node_modules/
+frontend/build/
+frontend/.svelte-kit/
+/build/

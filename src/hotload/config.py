@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     github_client_secret: str | None = None
     google_client_id: str | None = None
     google_client_secret: str | None = None
+    web_dir: Path | None = None  # built frontend (frontend/build); default: bundled fallback page
     redis_url: str = "redis://localhost:6379/0"
     data_dir: Path = Path("data")
     file_ttl_seconds: int = 3600

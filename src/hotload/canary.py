@@ -55,7 +55,7 @@ def _probe(url: str, headers: dict, settings: Settings, proxy: str | None) -> in
 
 def check_one(canary: dict, settings: Settings, proxy: str | None = None) -> dict:
     started = time.monotonic()
-    result = {"name": canary["name"], "site": canary["site"], "ok": False, "error": None, "formats": 0, "probe": None}
+    result = {"name": canary["name"], "site": canary["site"], "ok": False, "error": None, "formats": 0, "probe": None, "probes": []}
     try:
         with engine.SafeYoutubeDL({**engine._base_opts(settings, proxy), "skip_download": True}, settings) as ydl:
             info = ydl.extract_info(canary["url"], download=False)
@@ -65,13 +65,17 @@ def check_one(canary: dict, settings: Settings, proxy: str | None = None) -> dic
             result["error"] = f"only {result['formats']} formats"
         elif canary.get("probe", True):
             best = max(formats, key=lambda f: f.get("height") or 0) if formats else info
-            if best.get("protocol", "https") in ("https", "http") and best.get("url"):
-                result["probe"] = _probe(best["url"], best.get("http_headers") or {}, settings, proxy)
-                result["ok"] = result["probe"] in (200, 206)
-                if not result["ok"]:
-                    result["error"] = f"media probe returned HTTP {result['probe']}"
-            else:
-                result["ok"] = True  # manifest-based: extraction success is the best cheap signal
+            audio = [f for f in formats if f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none")]
+            # Probe the best video AND the best audio-only format: they are separate URLs and sites often
+            # block one but not the other (a video-only probe once passed while audio downloads got 403).
+            candidates = [best, *([max(audio, key=lambda f: f.get("abr") or 0)] if audio else [])]
+            statuses = [_probe(f["url"], f.get("http_headers") or {}, settings, proxy)
+                        for f in candidates if f.get("protocol", "https") in ("https", "http") and f.get("url")]
+            result["probe"] = statuses[0] if statuses else None
+            result["probes"] = statuses
+            result["ok"] = all(s in (200, 206) for s in statuses)  # manifest-only media: extraction is the signal
+            if not result["ok"]:
+                result["error"] = f"media probe returned HTTP {[s for s in statuses if s not in (200, 206)][0]}"
         else:
             result["ok"] = True
     except Exception as exc:  # noqa: BLE001 - a canary must never crash the runner

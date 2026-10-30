@@ -42,10 +42,14 @@ Code layout (`src/hotload`):
 - [ ] Still open: per-container resource limits/seccomp, FFmpeg wall-clock timeouts, canary run from the deployed
   environment in CI, alert rules shipped as code, S3-shared proxy health.
 
-### M2: Product (weeks 3-6)
-- SvelteKit PWA replacing the static UI (share target, i18n, dark mode, a11y).
-- Visual trim scrubber, subtitles download/convert, multi-audio tracks, playlist/batch to ZIP stream.
-- Accounts (email + OAuth), history, quotas.
+### M2: Product (weeks 3-6) - implemented
+- [x] SvelteKit PWA (static build served by the API): share target, installable, 6 languages, dark mode, a11y basics.
+- [x] Trim scrubber (audio and video), subtitles (SRT/VTT, embedded or separate, auto-captions, subtitles-only),
+  multi-audio-track selection, playlist expansion and batches with a streamed ZIP.
+- [x] Accounts (email+password, GitHub/Google), history, plan limits (see docs/ACCOUNTS.md).
+- [ ] Still open: email verification and password reset (needs a mail provider), Alembic migrations, live OAuth test,
+  native-speaker review of the es/fr/de/pt/sw translations, PWA offline page, axe/Lighthouse audits in CI,
+  proxying thumbnails (they currently load from the origin site and reveal the visitor's IP to it).
 
 ### M3: Monetization and scale (weeks 6-10)
 - Free/Premium/Pro tiers, high-risk payment processor integration, webhooks for billing.

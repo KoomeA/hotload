@@ -56,11 +56,13 @@ async def run_download(ctx: dict, job_id: str) -> None:
     tried: set[str] = set()
     error: engine.EngineError | None = None
     path = None
+    attempts = 0
     for attempt in range(1, settings.max_attempts + 1):
         try:
             proxy = pool.select(job.url, exclude=tried)
         except NoProxyAvailable:
             break
+        attempts = attempt
         tried.add(proxy or "direct")
         try:
             result = await asyncio.to_thread(
@@ -115,7 +117,7 @@ async def run_download(ctx: dict, job_id: str) -> None:
     if job.state == "error":
         await metrics.inc(redis, "hotload_job_errors_total", retryable=str(bool(error and error.retryable)).lower())
     log(logger, "job finished", job=job.id, url=url_ref(job.url), state=job.state, seconds=round(elapsed, 2),
-        attempts=len(tried), adult=job.adult)
+        attempts=attempts, adult=job.adult)
 
 
 async def cleanup(ctx: dict) -> None:

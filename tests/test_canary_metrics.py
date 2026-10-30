@@ -74,3 +74,33 @@ async def test_canary_ok_fail_and_degraded_status(tmp_path):
 def test_status_and_metrics_endpoints(client, settings):
     assert client.get("/api/v1/status").json()["canary"] is None
     assert client.get("/metrics").status_code == 200
+
+
+def test_canary_probes_audio_and_video_urls_separately(monkeypatch):
+    """A site can serve the video URL but block the audio-only one; the canary must notice."""
+    from hotload import engine
+
+    info = {"formats": [
+        {"url": "https://cdn.example/v.mp4", "height": 720, "acodec": "none", "vcodec": "avc1", "protocol": "https"},
+        {"url": "https://cdn.example/a.m4a", "acodec": "aac", "vcodec": "none", "abr": 128, "protocol": "https"},
+    ]}
+
+    class FakeYDL:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def extract_info(self, url, download=False):
+            return info
+
+    probed = []
+    monkeypatch.setattr(engine, "SafeYoutubeDL", FakeYDL)
+    monkeypatch.setattr(canary, "_probe", lambda url, h, s, p: probed.append(url) or (206 if url.endswith("mp4") else 403))
+    r = canary.check_one({"name": "x", "site": "x", "url": "https://example.com/v"}, Settings())
+    assert probed == ["https://cdn.example/v.mp4", "https://cdn.example/a.m4a"]
+    assert r["probes"] == [206, 403] and r["ok"] is False and "403" in r["error"]

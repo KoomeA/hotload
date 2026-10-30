@@ -96,6 +96,17 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
                        https_only=settings.cookie_secure, max_age=600)
 
     @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        if request.url.path.startswith("/api/"):
+            response.headers.setdefault("Cache-Control", "no-store")
+        return response
+
+    @app.middleware("http")
     async def same_origin(request: Request, call_next):
         if request.method not in ("GET", "HEAD", "OPTIONS") and not origin_allowed(request, settings):
             return JSONResponse({"detail": "Cross-site request blocked"}, status_code=403)
@@ -348,8 +359,9 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
 
     add_account_routes(app, settings, client_ip)
 
-    if WEB_DIR.exists():
-        app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
+    web_dir = settings.web_dir or WEB_DIR
+    if web_dir.exists():
+        app.mount("/", StaticFiles(directory=web_dir, html=True), name="web")
     return app
 
 
