@@ -3,6 +3,7 @@ import json
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 from arq import create_pool
 from arq.connections import RedisSettings
@@ -11,10 +12,11 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 from redis.asyncio import Redis
+from zipstream import ZipStream
 
 from .. import canary, compliance, engine, logging_setup, metrics, ratelimit, security
 from ..config import Settings, get_settings
-from ..jobs import JobStore
+from ..jobs import BatchStore, JobStore
 from ..proxies import NoProxyAvailable, ProxyPool
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -24,19 +26,36 @@ class ExtractRequest(BaseModel):
     url: str
 
 
-class JobRequest(BaseModel):
-    url: str
+class JobOptions(BaseModel):
     preset: str = "best_mp4"
     start: float | None = Field(default=None, ge=0)
     end: float | None = Field(default=None, gt=0)
-    subtitles: bool = False
+    subtitle_langs: list[str] = Field(default_factory=list, max_length=10)
+    subtitle_format: Literal["srt", "vtt"] = "srt"
+    subtitle_mode: Literal["embed", "file"] = "file"
+    subtitle_auto: bool = False
+    audio_lang: str | None = None
     age_confirmed: bool = False
 
     @model_validator(mode="after")
-    def _range(self):
+    def _check(self):
         if self.start is not None and self.end is not None and self.end <= self.start:
             raise ValueError("end must be greater than start")
+        for code in [*self.subtitle_langs, *([self.audio_lang] if self.audio_lang else [])]:
+            engine.validate_lang(code)
         return self
+
+
+class JobRequest(JobOptions):
+    url: str
+
+
+class BatchRequest(JobOptions):
+    urls: list[str] = Field(min_length=1, max_length=50)
+
+
+class PlaylistRequest(BaseModel):
+    url: str
 
 
 def create_app(settings: Settings | None = None, redis: Redis | None = None, enqueue=None) -> FastAPI:
@@ -50,6 +69,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         settings.output_dir.mkdir(parents=True, exist_ok=True)
         app.state.redis = redis or Redis.from_url(settings.redis_url, decode_responses=True)
         app.state.store = JobStore(app.state.redis, settings.job_ttl_seconds)
+        app.state.batches = BatchStore(app.state.redis, settings.job_ttl_seconds)
         pool = None
         if enqueue is None:
             pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
@@ -71,8 +91,8 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
                 return fwd.split(",")[0].strip()
         return request.client.host if request.client else "unknown"
 
-    async def guard(request: Request, url: str | None = None) -> str | None:
-        if not await ratelimit.allow(app.state.redis, client_ip(request), settings.rate_limit_per_minute):
+    async def guard(request: Request, url: str | None = None, cost: int = 1) -> str | None:
+        if not await ratelimit.allow(app.state.redis, client_ip(request), settings.rate_limit_per_minute, cost=cost):
             raise HTTPException(429, "Too many requests, slow down")
         if url is None:
             return None
@@ -141,21 +161,104 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         info["age_gate_required"] = info["adult"] and settings.require_age_gate
         return info
 
+    async def new_job(url: str, o: JobOptions, batch_id: str | None = None):
+        if o.preset not in engine.PRESETS:
+            raise HTTPException(400, "Unknown preset")
+        if engine.PRESETS[o.preset].subs_only and not o.subtitle_langs:
+            raise HTTPException(400, "Choose at least one subtitle language")
+        try:
+            adult = compliance.enforce_age_gate(url, None, o.age_confirmed, settings.require_age_gate)
+        except compliance.AgeGateRequired as exc:
+            raise HTTPException(451, str(exc)) from exc
+        return await app.state.store.create(
+            url=url, preset=o.preset, start=o.start, end=o.end, subtitle_langs=o.subtitle_langs,
+            subtitle_format=o.subtitle_format, subtitle_mode=o.subtitle_mode, subtitle_auto=o.subtitle_auto,
+            audio_lang=o.audio_lang, adult=adult, age_confirmed=o.age_confirmed, batch_id=batch_id,
+        )
+
     @app.post("/api/v1/jobs", status_code=202)
     async def create_job(body: JobRequest, request: Request):
         url = await guard(request, body.url)
-        if body.preset not in engine.PRESETS:
-            raise HTTPException(400, "Unknown preset")
-        try:
-            adult = compliance.enforce_age_gate(url, None, body.age_confirmed, settings.require_age_gate)
-        except compliance.AgeGateRequired as exc:
-            raise HTTPException(451, str(exc)) from exc
-        job = await app.state.store.create(
-            url=url, preset=body.preset, start=body.start, end=body.end, subtitles=body.subtitles,
-            adult=adult, age_confirmed=body.age_confirmed,
-        )
+        job = await new_job(url, body)
         await app.state.enqueue(job.id)
         return job.public()
+
+    @app.post("/api/v1/playlist")
+    async def playlist(body: PlaylistRequest, request: Request):
+        url = await guard(request, body.url)
+        try:
+            data = await asyncio.to_thread(
+                lambda: engine.extract_playlist(url, settings, app.state.pool.select(url), settings.max_playlist_entries))
+        except (engine.EngineError, NoProxyAvailable) as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if data["playlist"]:
+            checked = await asyncio.gather(*(asyncio.to_thread(_safe, e["url"]) for e in data["entries"]))
+            data["entries"] = [e for e, ok in zip(data["entries"], checked, strict=True) if ok]
+            data["count"] = len(data["entries"])
+        return data
+
+    def _safe(url: str) -> bool:
+        try:
+            security.validate_url(url, settings)
+            return True
+        except security.UnsafeURL:
+            return False
+
+    @app.post("/api/v1/batches", status_code=202)
+    async def create_batch(body: BatchRequest, request: Request):
+        if len(body.urls) > settings.max_batch_size:
+            raise HTTPException(400, f"At most {settings.max_batch_size} links per batch")
+        await guard(request, cost=len(body.urls))
+        urls = []
+        for raw in dict.fromkeys(u.strip() for u in body.urls if u.strip()):
+            try:
+                urls.append(await asyncio.to_thread(security.validate_url, raw, settings))
+            except security.UnsafeURL as exc:
+                raise HTTPException(400, f"{raw[:80]}: {exc}") from exc
+        jobs = [await new_job(u, body) for u in urls]
+        batch = await app.state.batches.create([j.id for j in jobs])
+        for j in jobs:
+            j.batch_id = batch.id
+            await app.state.store.save(j)
+            await app.state.enqueue(j.id)
+        return batch_view(batch, jobs)
+
+    def batch_view(batch, jobs):
+        done = [j for j in jobs if j.state == "done"]
+        return {
+            "id": batch.id,
+            "jobs": [j.public() for j in jobs],
+            "done": len(done),
+            "total": len(jobs),
+            "finished": all(j.state in ("done", "error") for j in jobs),
+            "zip_url": f"/api/v1/batches/{batch.id}/zip?token={batch.token}" if done else None,
+        }
+
+    async def load_batch(batch_id: str):
+        batch = await app.state.batches.get(batch_id)
+        if batch is None:
+            raise HTTPException(404, "Batch not found or expired")
+        jobs = [j for j in [await app.state.store.get(i) for i in batch.job_ids] if j]
+        return batch, jobs
+
+    @app.get("/api/v1/batches/{batch_id}")
+    async def get_batch(batch_id: str):
+        batch, jobs = await load_batch(batch_id)
+        return batch_view(batch, jobs)
+
+    @app.get("/api/v1/batches/{batch_id}/zip")
+    async def batch_zip(batch_id: str, token: str = Query(...)):
+        batch, jobs = await load_batch(batch_id)
+        if not secrets.compare_digest(token, batch.token):
+            raise HTTPException(403, "Invalid token")
+        files = [(j.path, j.filename) for j in jobs if j.state == "done" and j.path and Path(j.path).is_file()]
+        if not files:
+            raise HTTPException(404, "No finished files yet")
+        zs = ZipStream(sized=False)
+        for n, (path, name) in enumerate(files, 1):
+            zs.add_path(path, arcname=f"{n:02d} - {name}")
+        return StreamingResponse(zs, media_type="application/zip",
+                                 headers={"Content-Disposition": f'attachment; filename="hotload-{batch.id}.zip"'})
 
     async def load(job_id: str):
         job = await app.state.store.get(job_id)

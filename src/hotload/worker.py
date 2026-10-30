@@ -62,15 +62,19 @@ async def run_download(ctx: dict, job_id: str) -> None:
             break
         tried.add(proxy or "direct")
         try:
-            path = await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 partial(
                     engine.download, job.url, settings, storage.job_dir(settings.output_dir, job.id),
                     engine.PRESETS[job.preset], proxy=proxy, start=job.start, end=job.end,
-                    subtitles=job.subtitles, block_adult=settings.require_age_gate and not job.age_confirmed,
+                    subtitle_langs=job.subtitle_langs, subtitle_format=job.subtitle_format,
+                    subtitle_mode=job.subtitle_mode, subtitle_auto=job.subtitle_auto,
+                    audio_lang=job.audio_lang, max_duration=job.max_duration,
+                    block_adult=settings.require_age_gate and not job.age_confirmed,
                     progress=on_progress,
                 )
             )
             pool.report(proxy, True)
+            path, job.title, job.site = result.path, result.title, result.site
             error = None
             break
         except engine.EngineError as exc:

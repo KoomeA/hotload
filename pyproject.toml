@@ -16,6 +16,7 @@ dependencies = [
   "redis>=5",
   "pydantic>=2.6",
   "pydantic-settings>=2.2",
+  "zipstream-ng>=1.7",
 ]
 
 [project.optional-dependencies]

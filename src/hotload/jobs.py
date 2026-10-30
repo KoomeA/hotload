@@ -25,13 +25,21 @@ class Job:
     age_confirmed: bool = False
     start: float | None = None
     end: float | None = None
-    subtitles: bool = False
+    subtitle_langs: list[str] = field(default_factory=list)
+    subtitle_format: str = "srt"
+    subtitle_mode: str = "file"
+    subtitle_auto: bool = False
+    audio_lang: str | None = None
+    max_duration: int | None = None
+    site: str | None = None
+    user_id: str | None = None
+    batch_id: str | None = None
     created: float = field(default_factory=time.time)
     token: str = field(default_factory=lambda: secrets.token_urlsafe(24))
 
     def public(self) -> dict:
         d = asdict(self)
-        for hidden in ("path", "token", "url", "age_confirmed"):
+        for hidden in ("path", "token", "url", "age_confirmed", "user_id", "max_duration"):
             d.pop(hidden)
         d["download_url"] = f"/api/v1/jobs/{self.id}/file?token={self.token}" if self.state == "done" else None
         return d
@@ -56,3 +64,25 @@ class JobStore:
     async def get(self, job_id: str) -> Job | None:
         raw = await self.redis.get(self.key(job_id))
         return Job(**json.loads(raw)) if raw else None
+
+
+@dataclass
+class Batch:
+    id: str
+    job_ids: list[str]
+    created: float = field(default_factory=time.time)
+    token: str = field(default_factory=lambda: secrets.token_urlsafe(24))
+
+
+class BatchStore:
+    def __init__(self, redis: Redis, ttl: int):
+        self.redis, self.ttl = redis, ttl
+
+    async def create(self, job_ids: list[str]) -> Batch:
+        batch = Batch(id=secrets.token_urlsafe(9), job_ids=job_ids)
+        await self.redis.set(f"hotload:batch:{batch.id}", json.dumps(asdict(batch)), ex=self.ttl)
+        return batch
+
+    async def get(self, batch_id: str) -> Batch | None:
+        raw = await self.redis.get(f"hotload:batch:{batch_id}")
+        return Batch(**json.loads(raw)) if raw else None

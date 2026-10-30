@@ -1,6 +1,7 @@
 """Thin wrapper over the yt-dlp Python API. Blocking; run in a worker thread/process."""
 
 import re
+import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,6 +64,7 @@ class Preset:
     audio_codec: str | None = None
     audio_quality: str | None = None
     merge_format: str | None = None
+    subs_only: bool = False
 
 
 PRESETS: dict[str, Preset] = {
@@ -75,8 +77,38 @@ PRESETS: dict[str, Preset] = {
         Preset("mp3", "Audio (MP3 192k)", "ba/b", "mp3", "192"),
         Preset("m4a", "Audio (M4A)", "ba[ext=m4a]/ba/b", "m4a", "0"),
         Preset("opus", "Audio (Opus)", "ba/b", "opus", "0"),
+        Preset("subtitles", "Subtitles only", "", subs_only=True),
     )
 }
+
+
+LANG_RE = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,2}$")
+SUBTITLE_FORMATS = ("srt", "vtt")
+SUBTITLE_MODES = ("embed", "file")
+
+
+def validate_lang(code: str) -> str:
+    """Language codes end up inside yt-dlp format selectors, so they must be strictly validated."""
+    if not LANG_RE.fullmatch(code):
+        raise ValueError(f"Invalid language code: {code!r}")
+    return code
+
+
+def format_for(preset: Preset, audio_lang: str | None) -> str:
+    """Prefer the requested audio language, falling back to the preset's normal selection."""
+    if not audio_lang:
+        return preset.format
+    lang = validate_lang(audio_lang)
+    selector = re.sub(r"\bba\b(?!\[)", f"ba[language^={lang}]", preset.format)
+    selector = selector.replace("ba[ext=m4a]", f"ba[ext=m4a][language^={lang}]")
+    return f"{selector}/{preset.format}"
+
+
+@dataclass
+class DownloadResult:
+    path: Path
+    title: str | None = None
+    site: str | None = None
 
 
 def _base_opts(settings: Settings, proxy: str | None = None) -> dict:
@@ -126,6 +158,12 @@ def summarise(info: dict) -> dict:
         "is_live": bool(info.get("is_live")),
         "heights": heights,
         "has_subtitles": bool(info.get("subtitles")),
+        "subtitles": sorted(info.get("subtitles") or {})[:60],
+        "auto_captions": sorted(info.get("automatic_captions") or {})[:60],
+        "audio_langs": sorted({
+            f["language"] for f in info.get("formats") or []
+            if f.get("language") and f.get("acodec") not in (None, "none") and LANG_RE.fullmatch(f["language"])
+        }),
     }
 
 
@@ -136,16 +174,26 @@ def build_download_opts(
     proxy: str | None = None,
     start: float | None = None,
     end: float | None = None,
-    subtitles: bool = False,
+    subtitle_langs: list[str] | None = None,
+    subtitle_format: str = "srt",
+    subtitle_mode: str = "file",
+    subtitle_auto: bool = False,
+    audio_lang: str | None = None,
+    max_duration: int | None = None,
     block_adult: bool = False,
     progress: Callable[[dict], None] | None = None,
 ) -> dict:
     opts = _base_opts(settings, proxy)
+    langs = [validate_lang(code) for code in (subtitle_langs or [])]
+    if preset.subs_only and not langs:
+        raise EngineError("Choose at least one subtitle language")
+    if subtitle_format not in SUBTITLE_FORMATS or subtitle_mode not in SUBTITLE_MODES:
+        raise EngineError("Unsupported subtitle option")
     opts.update(
-        format=preset.format,
+        format=format_for(preset, audio_lang) if not preset.subs_only else None,
         outtmpl=str(workdir / "%(title).150B [%(id)s].%(ext)s"),
         paths={"home": str(workdir)},
-        match_filter=_duration_filter(settings.max_duration_seconds, start, end, block_adult),
+        match_filter=_duration_filter(max_duration or settings.max_duration_seconds, start, end, block_adult),
     )
     if preset.merge_format:
         opts["merge_output_format"] = preset.merge_format
@@ -155,12 +203,18 @@ def build_download_opts(
                     "preferredquality": preset.audio_quality or "0"})
         pps += [{"key": "FFmpegMetadata", "add_metadata": True}, {"key": "EmbedThumbnail"}]
         opts["writethumbnail"] = True
-    if subtitles and not preset.audio_codec:
-        opts.update(writesubtitles=True, writeautomaticsub=False, subtitleslangs=["en.*"])
-        pps.append({"key": "FFmpegEmbedSubtitle"})
+    if langs:
+        opts.update(writesubtitles=True, writeautomaticsub=subtitle_auto, subtitleslangs=langs)
+        if preset.subs_only:
+            opts["skip_download"] = True
+        if subtitle_mode == "embed" and not preset.audio_codec and not preset.subs_only:
+            pps.append({"key": "FFmpegEmbedSubtitle"})
+        else:
+            opts["subtitlesformat"] = f"{subtitle_format}/best"
+            pps.append({"key": "FFmpegSubtitlesConvertor", "format": subtitle_format, "when": "before_dl"})
     if pps:
         opts["postprocessors"] = pps
-    if start is not None or end is not None:
+    if (start is not None or end is not None) and not preset.subs_only:
         opts["download_ranges"] = download_range_func(None, [(start or 0, end or float("inf"))])
         opts["force_keyframes_at_cuts"] = True
     if progress:
@@ -185,18 +239,57 @@ def _duration_filter(max_seconds: int, start: float | None, end: float | None, b
     return _filter
 
 
-def download(url: str, settings: Settings, workdir: Path, preset: Preset, proxy: str | None = None, **kwargs) -> Path:
+_SKIP_SUFFIXES = {".part", ".ytdl", ".jpg", ".jpeg", ".webp", ".png", ".json", ".temp"}
+_SUB_SUFFIXES = {".srt", ".vtt", ".ass", ".lrc"}
+
+
+def download(url: str, settings: Settings, workdir: Path, preset: Preset, proxy: str | None = None, **kwargs) -> DownloadResult:
     workdir.mkdir(parents=True, exist_ok=True)
     opts = build_download_opts(settings, workdir, preset, proxy=proxy, **kwargs)
     try:
         with SafeYoutubeDL(opts, settings) as ydl:
-            ydl.download([url])
+            info = ydl.extract_info(url, download=True)
     except YoutubeDLError as exc:
         raise _wrap(exc) from exc
-    files = [p for p in workdir.iterdir() if p.is_file() and p.suffix not in (".part", ".ytdl", ".jpg", ".webp", ".png", ".vtt", ".srt")]
-    if not files:
+    path = package(workdir, keep_subs=kwargs.get("subtitle_mode", "file") == "file" or preset.subs_only)
+    return DownloadResult(path, (info or {}).get("title"), (info or {}).get("extractor_key"))
+
+
+def package(workdir: Path, keep_subs: bool = True) -> Path:
+    """Pick the deliverable: a single file as-is, or a ZIP when media plus subtitle files were produced."""
+    files = [p for p in workdir.iterdir() if p.is_file() and p.suffix.lower() not in _SKIP_SUFFIXES and p.suffix != ".zip"]
+    subs = sorted(p for p in files if p.suffix.lower() in _SUB_SUFFIXES)
+    media = [p for p in files if p not in subs]
+    outputs = (media + subs) if keep_subs else media
+    if not outputs:
         raise EngineError("Nothing was downloaded (the media may exceed a limit)")
-    return max(files, key=lambda p: p.stat().st_size)
+    if len(outputs) == 1:
+        return outputs[0]
+    main = max(media, key=lambda p: p.stat().st_size) if media else outputs[0]
+    archive = workdir / f"{main.stem[:120]}.zip"
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+        for p in outputs:
+            zf.write(p, arcname=p.name)
+    return archive
+
+
+def extract_playlist(url: str, settings: Settings, proxy: str | None = None, limit: int = 50) -> dict:
+    """List a playlist's entries without resolving each one. Non-playlists return {"playlist": False}."""
+    opts = {**_base_opts(settings, proxy), "noplaylist": False, "extract_flat": "in_playlist",
+            "skip_download": True, "playlistend": limit}
+    try:
+        with SafeYoutubeDL(opts, settings) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except YoutubeDLError as exc:
+        raise _wrap(exc) from exc
+    if not info or info.get("_type") != "playlist":
+        return {"playlist": False}
+    entries = []
+    for e in info.get("entries") or []:
+        link = (e or {}).get("url") or (e or {}).get("webpage_url")
+        if link and link.startswith(("http://", "https://")):
+            entries.append({"url": link, "title": e.get("title"), "duration": e.get("duration")})
+    return {"playlist": True, "title": info.get("title"), "count": len(entries), "entries": entries[:limit]}
 
 
 def _wrap(exc: Exception) -> EngineError:

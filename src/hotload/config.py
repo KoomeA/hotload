@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     proxy_failure_threshold: int = 3
     proxy_cooldown_seconds: int = 300
     max_attempts: int = 3
+    max_batch_size: int = 20
+    max_playlist_entries: int = 50
     allow_private_targets: bool = False  # tests/dev only: disables the outbound SSRF guard
     canary_enabled: bool = True
     canary_file: Path | None = None  # JSON file replacing the built-in canary list (e.g. adult sites)

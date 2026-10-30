@@ -49,8 +49,8 @@ def test_download_and_trim_local_media(tmp_path):
     try:
         url = f"http://127.0.0.1:{server.server_port}/clip.mp4"
         out = engine.download(url, Settings(allow_private_targets=True), tmp_path / "o1", engine.PRESETS["best_mp4"])
-        assert out.stat().st_size > 0
+        assert out.path.stat().st_size > 0 and out.title == "clip"
         mp3 = engine.download(url, Settings(allow_private_targets=True), tmp_path / "o2", engine.PRESETS["mp3"])
-        assert mp3.suffix == ".mp3"
+        assert mp3.path.suffix == ".mp3"
     finally:
         server.shutdown()

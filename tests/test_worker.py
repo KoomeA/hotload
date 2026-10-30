@@ -55,7 +55,7 @@ async def test_worker_rotates_proxy_on_retryable_failure_and_records_metrics(tmp
         workdir.mkdir(parents=True, exist_ok=True)
         out = workdir / "v.mp4"
         out.write_bytes(b"x")
-        return out
+        return engine.DownloadResult(out, "Title", "Generic")
 
     monkeypatch.setattr(engine, "download", fake_download)
     redis = FakeAsyncRedis(decode_responses=True)
@@ -64,6 +64,7 @@ async def test_worker_rotates_proxy_on_retryable_failure_and_records_metrics(tmp
     await worker.run_download({"store": store}, job.id)
     done = await store.get(job.id)
     assert seen == ["http://a:1", "http://b:2"] and done.state == "done"
+    assert done.title == "Title" and done.site == "Generic"
     assert pool.health()[0]["cooling_down"] is True  # the 403ing proxy was benched
     out = await metrics.render(redis)
     assert 'hotload_jobs_total{adult="false",preset="best_mp4",state="done"} 1' in out
