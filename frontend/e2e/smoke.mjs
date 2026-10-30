@@ -133,9 +133,9 @@ await step('batch of two links shows progress and a ZIP', async () => {
 });
 
 await step('web share target prefills and fetches the shared link', async () => {
-  await page.goto(`${BASE}/?title=Check%20this&text=${encodeURIComponent('Look at this ' + ZOO + ' it is great')}`);
-  await page.getByRole('heading', { name: 'Me at the zoo' }).waitFor({ timeout: 60000 });
-  ok((await page.getByLabel('Video or audio link').inputValue()) === ZOO, 'input holds just the link');
+  await page.goto(`${BASE}/?title=Check%20this&text=${encodeURIComponent('Look at this ' + BBB + ' it is great')}`);
+  await page.getByRole('heading', { name: 'Big Buck Bunny' }).waitFor({ timeout: 60000 });
+  ok((await page.getByLabel('Video or audio link').inputValue()) === BBB, 'input holds just the link');
   ok(!page.url().includes('text='), 'shared params removed from the address bar');
 });
 
@@ -195,9 +195,9 @@ await step('mobile viewport: no horizontal scroll, controls reachable', async ()
   const m = await browser.newContext({ viewport: { width: 375, height: 800 }, isMobile: true, hasTouch: true });
   const p = await m.newPage();
   await p.goto(BASE + '/');
-  await p.getByLabel('Video or audio link').fill(ZOO);
+  await p.getByLabel('Video or audio link').fill(BBB);
   await p.getByRole('button', { name: 'Fetch' }).click();
-  await p.getByRole('heading', { name: 'Me at the zoo' }).waitFor({ timeout: 60000 });
+  await p.getByRole('heading', { name: 'Big Buck Bunny' }).waitFor({ timeout: 60000 });
   await p.getByLabel('Download only part of it').check();
   const overflow = await p.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   await p.screenshot({ path: path.join(out, 'mobile.png'), fullPage: true });
