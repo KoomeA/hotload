@@ -2,9 +2,9 @@ FROM python:3.12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 hotload
 WORKDIR /app
-COPY pyproject.toml README.md LICENSE ./
+COPY pyproject.toml constraints.txt README.md LICENSE ./
 COPY src ./src
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir -c constraints.txt .
 USER hotload
 ENV HOTLOAD_DATA_DIR=/data
 EXPOSE 8000

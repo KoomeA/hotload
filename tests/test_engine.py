@@ -13,7 +13,7 @@ from hotload.config import Settings
 def test_presets_build_options(tmp_path):
     opts = engine.build_download_opts(Settings(), tmp_path, engine.PRESETS["mp3"])
     assert opts["postprocessors"][0]["preferredcodec"] == "mp3" and opts["allow_unplayable_formats"] is False
-    clip = engine.build_download_opts(Settings(proxy_url="http://p:1"), tmp_path, engine.PRESETS["720p"], start=5, end=15)
+    clip = engine.build_download_opts(Settings(), tmp_path, engine.PRESETS["720p"], proxy="http://p:1", start=5, end=15)
     assert "download_ranges" in clip and clip["proxy"] == "http://p:1" and clip["merge_output_format"] == "mp4"
 
 
@@ -48,9 +48,9 @@ def test_download_and_trim_local_media(tmp_path):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         url = f"http://127.0.0.1:{server.server_port}/clip.mp4"
-        out = engine.download(url, Settings(), tmp_path / "o1", engine.PRESETS["best_mp4"])
+        out = engine.download(url, Settings(allow_private_targets=True), tmp_path / "o1", engine.PRESETS["best_mp4"])
         assert out.stat().st_size > 0
-        mp3 = engine.download(url, Settings(), tmp_path / "o2", engine.PRESETS["mp3"])
+        mp3 = engine.download(url, Settings(allow_private_targets=True), tmp_path / "o2", engine.PRESETS["mp3"])
         assert mp3.suffix == ".mp3"
     finally:
         server.shutdown()

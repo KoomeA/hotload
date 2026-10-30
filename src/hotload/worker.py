@@ -1,15 +1,29 @@
 """Arq worker. Run with: arq hotload.worker.WorkerSettings"""
 
 import asyncio
+import logging
 import re
+import time
 from functools import partial
 
 from arq import cron
 from arq.connections import RedisSettings
 
-from . import engine, storage
+from . import canary, engine, logging_setup, metrics, storage
 from .config import get_settings
 from .jobs import JobStore
+from .logging_setup import log, url_ref
+from .proxies import NoProxyAvailable, ProxyPool, mask
+
+logger = logging.getLogger("hotload.worker")
+_pool: ProxyPool | None = None
+
+
+def get_pool() -> ProxyPool:
+    global _pool
+    if _pool is None:
+        _pool = ProxyPool.from_settings(get_settings())
+    return _pool
 
 
 async def run_download(ctx: dict, job_id: str) -> None:
@@ -20,8 +34,10 @@ async def run_download(ctx: dict, job_id: str) -> None:
         return
     job.state, job.message = "running", "Starting"
     await store.save(job)
+    redis = store.redis
     loop = asyncio.get_running_loop()
     last = {"t": 0.0}
+    started = time.monotonic()
 
     def on_progress(d: dict) -> None:  # runs in the download thread
         if d.get("status") != "downloading":
@@ -35,33 +51,79 @@ async def run_download(ctx: dict, job_id: str) -> None:
             job.progress = pct
             asyncio.run_coroutine_threadsafe(store.save(job), loop)
 
-    try:
-        path = await asyncio.to_thread(
-            partial(
-                engine.download, job.url, settings, storage.job_dir(settings.output_dir, job.id),
-                engine.PRESETS[job.preset], start=job.start, end=job.end,
-                subtitles=job.subtitles, block_adult=settings.require_age_gate and not job.age_confirmed,
-                progress=on_progress,
+    pool = get_pool()
+    tried: set[str] = set()
+    error: engine.EngineError | None = None
+    path = None
+    for attempt in range(1, settings.max_attempts + 1):
+        try:
+            proxy = pool.select(job.url, exclude=tried)
+        except NoProxyAvailable:
+            break
+        tried.add(proxy or "direct")
+        try:
+            path = await asyncio.to_thread(
+                partial(
+                    engine.download, job.url, settings, storage.job_dir(settings.output_dir, job.id),
+                    engine.PRESETS[job.preset], proxy=proxy, start=job.start, end=job.end,
+                    subtitles=job.subtitles, block_adult=settings.require_age_gate and not job.age_confirmed,
+                    progress=on_progress,
+                )
             )
-        )
+            pool.report(proxy, True)
+            error = None
+            break
+        except engine.EngineError as exc:
+            error = exc
+            if exc.retryable:
+                pool.report(proxy, False)
+                log(logger, "download attempt failed", logging.WARNING, job=job.id, url=url_ref(job.url),
+                    attempt=attempt, proxy=mask(proxy), error=str(exc))
+                job.message = f"Retrying ({attempt}/{settings.max_attempts})"
+                await store.save(job)
+                last["t"] = 0.0
+                continue
+            break
+        except Exception:  # noqa: BLE001 - never leak internals to the client
+            logger.exception("unexpected download failure", extra={"ctx": {"job": job.id}})
+            error = engine.EngineError("Unexpected error while downloading")
+            break
+
+    if path is not None and error is None:
         job.state, job.progress, job.message = "done", 100.0, "Ready"
         job.path = str(path)
         job.filename = re.sub(r"[^\w .()\[\]-]", "_", path.name)
-    except engine.EngineError as exc:
-        job.state, job.message = "error", str(exc)
-    except Exception:  # noqa: BLE001 - never leak internals to the client
-        job.state, job.message = "error", "Unexpected error while downloading"
+    else:
+        job.state = "error"
+        job.message = str(error) if error else "No working connection was available, try again later"
     await store.save(job)
+
+    elapsed = time.monotonic() - started
+    await metrics.inc(redis, "hotload_jobs_total", state=job.state, preset=job.preset, adult=str(job.adult).lower())
+    await metrics.observe(redis, "hotload_job_seconds", elapsed, state=job.state)
+    if job.state == "error":
+        await metrics.inc(redis, "hotload_job_errors_total", retryable=str(bool(error and error.retryable)).lower())
+    log(logger, "job finished", job=job.id, url=url_ref(job.url), state=job.state, seconds=round(elapsed, 2),
+        attempts=len(tried), adult=job.adult)
 
 
 async def cleanup(ctx: dict) -> None:
     s = get_settings()
-    storage.cleanup_expired(s.output_dir, s.file_ttl_seconds)
+    removed = storage.cleanup_expired(s.output_dir, s.file_ttl_seconds)
+    if removed:
+        log(logger, "expired job files removed", count=removed)
+
+
+async def run_canaries(ctx: dict) -> None:
+    s = get_settings()
+    if s.canary_enabled:
+        await canary.run_and_record(ctx["redis_client"], s, get_pool())
 
 
 async def startup(ctx: dict) -> None:
     from redis.asyncio import Redis
 
+    logging_setup.setup()
     s = get_settings()
     s.output_dir.mkdir(parents=True, exist_ok=True)
     ctx["redis_client"] = Redis.from_url(s.redis_url, decode_responses=True)
@@ -74,7 +136,10 @@ async def shutdown(ctx: dict) -> None:
 
 class WorkerSettings:
     functions = [run_download]
-    cron_jobs = [cron(cleanup, minute={0, 10, 20, 30, 40, 50})]
+    cron_jobs = [
+        cron(cleanup, minute={0, 10, 20, 30, 40, 50}),
+        cron(run_canaries, minute={5, 20, 35, 50}, run_at_startup=True, timeout=600),
+    ]
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)

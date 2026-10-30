@@ -7,14 +7,15 @@ from pathlib import Path
 from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 from redis.asyncio import Redis
 
-from .. import compliance, engine, ratelimit, security
+from .. import canary, compliance, engine, logging_setup, metrics, ratelimit, security
 from ..config import Settings, get_settings
 from ..jobs import JobStore
+from ..proxies import NoProxyAvailable, ProxyPool
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -44,6 +45,8 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        logging_setup.setup()
+        app.state.pool = ProxyPool.from_settings(settings)
         settings.output_dir.mkdir(parents=True, exist_ok=True)
         app.state.redis = redis or Redis.from_url(settings.redis_url, decode_responses=True)
         app.state.store = JobStore(app.state.redis, settings.job_ttl_seconds)
@@ -78,10 +81,48 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         except security.UnsafeURL as exc:
             raise HTTPException(400, str(exc)) from exc
 
+    def extract_with_retries(url: str) -> dict:
+        """Blocking: try up to `max_attempts` egress routes, rotating proxies on retryable failures."""
+        pool: ProxyPool = app.state.pool
+        tried: set[str] = set()
+        last: engine.EngineError | None = None
+        for _ in range(settings.max_attempts):
+            try:
+                proxy = pool.select(url, exclude=tried)
+            except NoProxyAvailable:
+                break
+            tried.add(proxy or "direct")
+            try:
+                info = engine.extract(url, settings, proxy=proxy)
+                pool.report(proxy, True)
+                return info
+            except engine.EngineError as exc:
+                last = exc
+                if not exc.retryable:
+                    break
+                pool.report(proxy, False)
+        raise last or engine.EngineError("No working connection was available, try again later", retryable=True)
+
     @app.get("/healthz")
     async def healthz():
         await app.state.redis.ping()
         return {"ok": True}
+
+    @app.get("/api/v1/status")
+    async def status():
+        """Public health summary: yt-dlp version and which sites are currently degraded."""
+        latest = await canary.latest(app.state.redis)
+        return {
+            "ok": True,
+            "canary": latest and {k: latest[k] for k in ("checked_at", "ytdlp_version", "degraded")},
+            "sites": latest and [{"name": r["name"], "site": r["site"], "ok": r["ok"]} for r in latest["results"]],
+        }
+
+    @app.get("/metrics", response_class=PlainTextResponse)
+    async def prometheus(request: Request):
+        if settings.metrics_token and request.headers.get("authorization") != f"Bearer {settings.metrics_token}":
+            raise HTTPException(401, "Unauthorized")
+        return await metrics.render(app.state.redis)
 
     @app.get("/api/v1/presets")
     async def presets():
@@ -91,9 +132,11 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
     async def extract(body: ExtractRequest, request: Request):
         url = await guard(request, body.url)
         try:
-            info = await asyncio.to_thread(engine.extract, url, settings)
+            info = await asyncio.to_thread(extract_with_retries, url)
         except engine.EngineError as exc:
-            raise HTTPException(422, str(exc)) from exc
+            await metrics.inc(app.state.redis, "hotload_extract_total", result="error")
+            raise HTTPException(503 if exc.retryable else 422, str(exc)) from exc
+        await metrics.inc(app.state.redis, "hotload_extract_total", result="ok", site=str(info.get("site")))
         info["adult"] = compliance.is_adult(url, info)
         info["age_gate_required"] = info["adult"] and settings.require_age_gate
         return info

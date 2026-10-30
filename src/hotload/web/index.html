@@ -47,6 +47,7 @@
     <div id="status" class="sub"></div>
   </section>
   <p id="error" class="err" role="alert"></p>
+  <p id="degraded" class="sub" role="status" hidden></p>
   <footer>Only download content you have the right to download. Files are deleted after one hour.</footer>
 </main>
 <script>
@@ -60,6 +61,7 @@ async function api(path, opts) {
   return body;
 }
 const fmt = s => s == null ? '' : Math.floor(s/60) + ':' + String(Math.floor(s%60)).padStart(2,'0');
+api('/api/v1/status').then(s => { const d = s.canary && s.canary.degraded; if (d && d.length) { $('degraded').hidden = false; $('degraded').textContent = 'Some sites are having trouble right now (' + d.join(', ') + '). Downloads from them may fail.'; } }).catch(() => {});
 api('/api/v1/presets').then(ps => { $('preset').innerHTML = ps.map(p => `<option value="${p.key}">${p.label}</option>`).join(''); });
 $('f').addEventListener('submit', async e => {
   e.preventDefault(); fail(); $('go').disabled = true; $('info').classList.remove('show');

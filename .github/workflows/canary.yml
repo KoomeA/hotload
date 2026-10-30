@@ -1,0 +1,16 @@
+name: Canary
+# Informational: runs the extraction canaries from a GitHub runner. Datacentre IPs get blocked by some sites,
+# so failures here mean "look", not "broken". The authoritative canary runs inside the deployed worker.
+on:
+  schedule:
+    - cron: "43 */6 * * *"
+  workflow_dispatch:
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -c constraints.txt -e .
+      - run: python -m hotload.canary --min-success 0.5

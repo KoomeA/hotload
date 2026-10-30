@@ -33,11 +33,14 @@ Code layout (`src/hotload`):
 - Worker + Docker Compose; minimal static web UI.
 - Unit/API tests (mocked engine).
 
-### M1: Reliability (weeks 2-3)
-- Canary monitor: test URLs per major site every 15 min, alerts, auto-bump yt-dlp image, rollback on failure.
-- Proxy pool support (per-site routing, health checks, rotation).
-- Sandboxed worker image (non-root, read-only FS, no internal network, cgroup limits), FFmpeg timeouts.
-- Metrics (Prometheus) + structured logs.
+### M1: Reliability (weeks 2-3) - implemented, see docs/RELIABILITY.md
+- [x] Canary monitor (extract + media probe, degraded-site status, CLI gate), cron in worker.
+- [x] Proxy pool: per-site routing, rotation, cooldown, retry on retryable failures.
+- [x] Outbound SSRF guard in the engine (covers redirects yt-dlp follows and FFmpeg trim URLs) + egress-filter overlay.
+- [x] Metrics (`/metrics`, Prometheus text) and structured JSON logs.
+- [x] yt-dlp pinned (`constraints.txt`) with a daily bump PR gated by tests + canary.
+- [ ] Still open: per-container resource limits/seccomp, FFmpeg wall-clock timeouts, canary run from the deployed
+  environment in CI, alert rules shipped as code, S3-shared proxy health.
 
 ### M2: Product (weeks 3-6)
 - SvelteKit PWA replacing the static UI (share target, i18n, dark mode, a11y).

@@ -1,0 +1,25 @@
+# Overlay: docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.hardened.yml up
+# Worker has no direct internet access; all egress goes through the filtering proxy (deploy/egress/squid.conf).
+# NOTE: if you configure HOTLOAD_PROXY_URLS (upstream residential proxies), the worker connects to them
+# directly and bypasses this filter. Enforce the same deny-list on the upstream provider or host firewall.
+services:
+  egress:
+    image: ubuntu/squid:latest
+    volumes: ["./egress/squid.conf:/etc/squid/squid.conf:ro"]
+    networks: [internal, internet]
+    restart: unless-stopped
+  worker:
+    environment:
+      HTTP_PROXY: http://egress:3128
+      HTTPS_PROXY: http://egress:3128
+      NO_PROXY: redis
+    networks: [internal]
+    depends_on: [egress]
+  redis:
+    networks: [internal]
+  api:
+    networks: [internal, internet]
+networks:
+  internal:
+    internal: true
+  internet: {}

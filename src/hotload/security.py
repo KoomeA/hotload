@@ -21,8 +21,14 @@ def _is_public_ip(ip: str) -> bool:
     return addr.is_global and not addr.is_multicast
 
 
-def validate_url(url: str, settings: Settings, resolve=socket.getaddrinfo) -> str:
-    """Return a normalised URL or raise UnsafeURL. `resolve` is injectable for tests."""
+def validate_url(
+    url: str, settings: Settings, resolve=socket.getaddrinfo, enforce_allowlist: bool = True
+) -> str:
+    """Return a normalised URL or raise UnsafeURL. `resolve` is injectable for tests.
+
+    `enforce_allowlist=False` is used for outbound requests made *while processing* an allowed URL
+    (CDNs, manifests): they must still be public and not blocked, but need not be on the allowlist.
+    """
     if len(url) > 2048:
         raise UnsafeURL("URL too long")
     parts = urlsplit(url.strip())
@@ -33,7 +39,7 @@ def validate_url(url: str, settings: Settings, resolve=socket.getaddrinfo) -> st
     host = parts.hostname
     if _host_matches(host, settings.blocked_hosts):
         raise UnsafeURL("This site is blocked")
-    if settings.allowed_hosts and not _host_matches(host, settings.allowed_hosts):
+    if enforce_allowlist and settings.allowed_hosts and not _host_matches(host, settings.allowed_hosts):
         raise UnsafeURL("This site is not allowed")
     try:
         literal = ipaddress.ip_address(host)
