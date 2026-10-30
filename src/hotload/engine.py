@@ -162,6 +162,7 @@ def summarise(info: dict) -> dict:
         "site": info.get("extractor_key"),
         "age_limit": info.get("age_limit") or 0,
         "is_live": bool(info.get("is_live")),
+        "live_status": info.get("live_status"),
         "heights": heights,
         "has_subtitles": bool(info.get("subtitles")),
         "subtitles": sorted(info.get("subtitles") or {})[:60],
@@ -187,6 +188,7 @@ def build_download_opts(
     subtitle_auto: bool = False,
     audio_lang: str | None = None,
     sponsorblock: str = "off",
+    live_seconds: int | None = None,
     max_duration: int | None = None,
     block_adult: bool = False,
     blocked_media: frozenset[str] = frozenset(),
@@ -202,7 +204,8 @@ def build_download_opts(
         format=format_for(preset, audio_lang) if not preset.subs_only else None,
         outtmpl=str(workdir / "%(title).150B [%(id)s].%(ext)s"),
         paths={"home": str(workdir)},
-        match_filter=_duration_filter(max_duration or settings.max_duration_seconds, start, end, block_adult, blocked_media),
+        match_filter=_duration_filter(max_duration or settings.max_duration_seconds, start, end, block_adult, blocked_media,
+                                      recording=bool(live_seconds)),
     )
     if preset.merge_format:
         opts["merge_output_format"] = preset.merge_format
@@ -240,20 +243,32 @@ def build_download_opts(
     if (start is not None or end is not None) and not preset.subs_only:
         opts["download_ranges"] = download_range_func(None, [(start or 0, end or float("inf"))])
         opts["force_keyframes_at_cuts"] = True
+    if live_seconds:
+        if start is not None or end is not None or sponsorblock != "off" or preset.subs_only:
+            raise EngineError("Live recording cannot be combined with trimming, SponsorBlock or subtitles-only")
+        # FFmpeg itself enforces the time cap, so the recording ends cleanly with a finalised file. The input timeout
+        # stops a stalled stream from holding a worker slot forever.
+        opts["external_downloader"] = {"default": "ffmpeg"}
+        opts["external_downloader_args"] = {"ffmpeg_i": ["-rw_timeout", "30000000"], "ffmpeg": ["-t", str(int(live_seconds))]}
+        opts["live_from_start"] = False
     if progress:
         opts["progress_hooks"] = [progress]
     return opts
 
 
 def _duration_filter(max_seconds: int, start: float | None, end: float | None, block_adult: bool = False,
-                     blocked_media: frozenset[str] = frozenset()):
+                     blocked_media: frozenset[str] = frozenset(), recording: bool = False):
     def _filter(info, *, incomplete):
         if blocked_media and f"{info.get('extractor_key')}:{info.get('id')}" in blocked_media:
             return "This content is not available"
         if block_adult and (info.get("age_limit") or 0) >= 18:
             return "Age confirmation required for this content"
+        if recording:
+            if info.get("live_status") == "is_upcoming":
+                return "This stream has not started yet"
+            return None  # the recording length is capped by FFmpeg, not by the media duration
         if info.get("is_live"):
-            return "Live streams are not supported yet"
+            return "This is a live stream: choose Record live stream to capture it"
         duration = info.get("duration")
         if duration is None:
             return None

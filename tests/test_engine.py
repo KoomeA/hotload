@@ -22,7 +22,7 @@ def test_filter_rules():
     assert f({"duration": 30}, incomplete=False) is None
     assert "limit" in f({"duration": 120}, incomplete=False)
     assert "Age" in f({"age_limit": 18, "duration": 1}, incomplete=False)
-    assert "Live" in f({"is_live": True}, incomplete=False)
+    assert "live stream" in f({"is_live": True}, incomplete=False)
     assert engine._duration_filter(60, 0, 30)({"duration": 600}, incomplete=False) is None  # trimmed selection fits
 
 

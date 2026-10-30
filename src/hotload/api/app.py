@@ -65,6 +65,7 @@ class JobOptions(BaseModel):
     subtitle_auto: bool = False
     audio_lang: str | None = None
     sponsorblock: Literal["off", "mark", "remove"] = "off"
+    live_minutes: int | None = Field(default=None, ge=1, le=240)  # record a live stream for this long
     use_cookies: bool = False  # use my saved cookies for this site (see docs/COOKIES.md)
     age_confirmed: bool = False
     webhook_url: str | None = Field(default=None, max_length=2048)  # API keys only: signed POST when the job finishes
@@ -75,6 +76,8 @@ class JobOptions(BaseModel):
             raise ValueError("end must be greater than start")
         if self.sponsorblock != "off" and (self.start is not None or self.end is not None):
             raise ValueError("Choose either trimming or SponsorBlock, not both")
+        if self.live_minutes and (self.start is not None or self.end is not None or self.sponsorblock != "off"):
+            raise ValueError("Live recording cannot be combined with trimming or SponsorBlock")
         for code in [*self.subtitle_langs, *([self.audio_lang] if self.audio_lang else [])]:
             engine.validate_lang(code)
         return self
@@ -281,6 +284,14 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         preset = engine.PRESETS[o.preset]
         if preset.subs_only and not o.subtitle_langs:
             raise HTTPException(400, "Choose at least one subtitle language")
+        if o.live_minutes:
+            if preset.subs_only:
+                raise HTTPException(400, "Live recording cannot be combined with subtitles-only")
+            cap = tier.live_minutes if settings.quotas_enabled else settings.max_live_minutes
+            if cap <= 0:
+                raise HTTPException(403, "Recording live streams needs a Premium or Pro plan")
+            if o.live_minutes > cap:
+                raise HTTPException(400, f"Your plan allows recordings up to {cap} minutes")
         if settings.quotas_enabled:
             if (o.start is not None or o.end is not None) and not preset.audio_codec and not preset.subs_only \
                     and not tier.trim_video:
@@ -312,7 +323,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         job = await app.state.store.create(
             url=url, preset=o.preset, start=o.start, end=o.end, subtitle_langs=o.subtitle_langs,
             subtitle_format=o.subtitle_format, subtitle_mode=o.subtitle_mode, subtitle_auto=o.subtitle_auto,
-            audio_lang=o.audio_lang, sponsorblock=o.sponsorblock, use_cookies=o.use_cookies, adult=adult, age_confirmed=o.age_confirmed, batch_id=batch_id,
+            audio_lang=o.audio_lang, sponsorblock=o.sponsorblock, use_cookies=o.use_cookies, live_seconds=o.live_minutes * 60 if o.live_minutes else None, adult=adult, age_confirmed=o.age_confirmed, batch_id=batch_id,
             user_id=user.id if user else None, key_id=key.id if key else None, webhook_url=webhook_url,
             max_duration=tier.max_duration if settings.quotas_enabled else None,
         )

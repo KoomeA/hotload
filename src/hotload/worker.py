@@ -81,6 +81,10 @@ async def _run_download(ctx: dict, job, cookie_path) -> None:
         return
     blocked_media = frozenset(rules.media)
 
+    recording = None
+    if job.live_seconds:  # no byte totals while recording a live stream: report elapsed/planned time instead
+        recording = asyncio.create_task(_report_recording(store, job, job.live_seconds))
+
     pool = get_pool()
     tried: set[str] = set()
     error: engine.EngineError | None = None
@@ -100,7 +104,8 @@ async def _run_download(ctx: dict, job, cookie_path) -> None:
                     engine.PRESETS[job.preset], proxy=proxy, cookiefile=cookie_path, start=job.start, end=job.end,
                     subtitle_langs=job.subtitle_langs, subtitle_format=job.subtitle_format,
                     subtitle_mode=job.subtitle_mode, subtitle_auto=job.subtitle_auto,
-                    audio_lang=job.audio_lang, sponsorblock=job.sponsorblock, max_duration=job.max_duration,
+                    audio_lang=job.audio_lang, sponsorblock=job.sponsorblock, live_seconds=job.live_seconds,
+                    max_duration=job.max_duration,
                     block_adult=settings.require_age_gate and not job.age_confirmed,
                     blocked_media=blocked_media, progress=on_progress,
                 )
@@ -125,6 +130,8 @@ async def _run_download(ctx: dict, job, cookie_path) -> None:
             error = engine.EngineError("Unexpected error while downloading")
             break
 
+    if recording is not None:
+        recording.cancel()
     if path is not None and error is None:
         job.filename = re.sub(r"[^\w .()\[\]-]", "_", path.name)
         remote = ctx.get("remote")
@@ -184,6 +191,16 @@ async def deliver_webhook(ctx: dict, job_id: str) -> None:
         await metrics.inc(ctx["store"].redis, "hotload_webhooks_total", result="failed")
 
 
+async def _report_recording(store: JobStore, job, seconds: int) -> None:
+    started = time.monotonic()
+    while True:
+        await asyncio.sleep(3)
+        elapsed = time.monotonic() - started
+        job.progress = min(99.0, round(100 * elapsed / seconds, 1))
+        job.message = f"Recording… {int(elapsed)}s of {seconds}s"
+        await store.save(job)
+
+
 async def cleanup(ctx: dict) -> None:
     s = get_settings()
     removed = storage.cleanup_expired(s.output_dir, s.file_ttl_seconds)
@@ -233,4 +250,4 @@ class WorkerSettings:
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
     queue_name = get_settings().worker_queue or "arq:queue"
     max_jobs = 4
-    job_timeout = 1800
+    job_timeout = 5400  # a live recording may hold a worker for up to max_live_minutes (default 60)

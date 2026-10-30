@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     # Fernet key(s) for saved cookies, comma separated (first encrypts, all decrypt: rotation). Unset = feature off.
     # Generate one with: python -m hotload.admin cookie-key
     cookie_key: str | None = None
+    max_live_minutes: int = 60  # longest live recording a job may request (a worker slot is held that long)
     redis_url: str = "redis://localhost:6379/0"
     data_dir: Path = Path("data")
     file_ttl_seconds: int = 3600

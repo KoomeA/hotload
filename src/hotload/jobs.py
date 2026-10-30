@@ -32,6 +32,7 @@ class Job:
     audio_lang: str | None = None
     sponsorblock: str = "off"
     use_cookies: bool = False
+    live_seconds: int | None = None
     max_duration: int | None = None
     site: str | None = None
     user_id: str | None = None
