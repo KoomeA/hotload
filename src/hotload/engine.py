@@ -181,6 +181,7 @@ def build_download_opts(
     audio_lang: str | None = None,
     max_duration: int | None = None,
     block_adult: bool = False,
+    blocked_media: frozenset[str] = frozenset(),
     progress: Callable[[dict], None] | None = None,
 ) -> dict:
     opts = _base_opts(settings, proxy)
@@ -193,7 +194,7 @@ def build_download_opts(
         format=format_for(preset, audio_lang) if not preset.subs_only else None,
         outtmpl=str(workdir / "%(title).150B [%(id)s].%(ext)s"),
         paths={"home": str(workdir)},
-        match_filter=_duration_filter(max_duration or settings.max_duration_seconds, start, end, block_adult),
+        match_filter=_duration_filter(max_duration or settings.max_duration_seconds, start, end, block_adult, blocked_media),
     )
     if preset.merge_format:
         opts["merge_output_format"] = preset.merge_format
@@ -222,8 +223,11 @@ def build_download_opts(
     return opts
 
 
-def _duration_filter(max_seconds: int, start: float | None, end: float | None, block_adult: bool = False):
+def _duration_filter(max_seconds: int, start: float | None, end: float | None, block_adult: bool = False,
+                     blocked_media: frozenset[str] = frozenset()):
     def _filter(info, *, incomplete):
+        if blocked_media and f"{info.get('extractor_key')}:{info.get('id')}" in blocked_media:
+            return "This content is not available"
         if block_adult and (info.get("age_limit") or 0) >= 18:
             return "Age confirmation required for this content"
         if info.get("is_live"):

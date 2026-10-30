@@ -15,6 +15,7 @@ from sqlalchemy import (
     select,
     update,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -45,6 +46,7 @@ class User(Base):
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     tier: Mapped[str] = mapped_column(String(16), default="free")
     tier_expires: Mapped[float | None] = mapped_column(Float, nullable=True)  # None = never (manual grants)
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)  # set only from the server CLI, never by email
     oauth_provider: Mapped[str | None] = mapped_column(String(16), nullable=True)
     oauth_sub: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created: Mapped[float] = mapped_column(Float, default=time.time)
@@ -257,6 +259,66 @@ class Database:
             user = await s.get(User, user_id)
             user.tier, user.tier_expires = tier, expires
             await s.commit()
+
+    # --- admin: blocklist, reports, users
+    async def set_admin(self, email: str, value: bool) -> bool:
+        async with self.session() as s:
+            res = await s.execute(update(User).where(User.email == email.strip().lower()).values(is_admin=value))
+            await s.commit()
+            return res.rowcount == 1
+
+    async def blocked_items(self) -> list[BlockedItem]:
+        async with self.session() as s:
+            return list((await s.execute(select(BlockedItem).order_by(BlockedItem.id))).scalars())
+
+    async def add_block(self, kind: str, value: str, reason: str, admin_id: str | None) -> BlockedItem | None:
+        async with self.session() as s:
+            item = BlockedItem(kind=kind, value=value, reason=reason[:200], created_by=admin_id)
+            s.add(item)
+            try:
+                await s.commit()
+            except IntegrityError:
+                await s.rollback()
+                return None
+            return item
+
+    async def remove_block(self, block_id: int) -> bool:
+        async with self.session() as s:
+            res = await s.execute(delete(BlockedItem).where(BlockedItem.id == block_id))
+            await s.commit()
+            return res.rowcount == 1
+
+    async def add_report(self, **kwargs) -> Report:
+        async with self.session() as s:
+            report = Report(**kwargs)
+            s.add(report)
+            await s.commit()
+            return report
+
+    async def list_reports(self, status: str | None = None, limit: int = 100) -> list[dict]:
+        async with self.session() as s:
+            q = select(Report).order_by(Report.created.desc()).limit(limit)
+            if status:
+                q = q.where(Report.status == status)
+            return [r.public() for r in (await s.execute(q)).scalars()]
+
+    async def resolve_report(self, report_id: str, status: str) -> dict | None:
+        async with self.session() as s:
+            report = await s.get(Report, report_id)
+            if report is None:
+                return None
+            report.status, report.resolved = status, time.time()
+            await s.commit()
+            return report.public()
+
+    async def counts(self) -> dict:
+        from sqlalchemy import func
+
+        async with self.session() as s:
+            users = (await s.execute(select(func.count()).select_from(User))).scalar_one()
+            paid = (await s.execute(select(func.count()).select_from(Payment).where(Payment.status == "paid"))).scalar_one()
+            open_reports = (await s.execute(select(func.count()).select_from(Report).where(Report.status == "open"))).scalar_one()
+            return {"users": users, "paid_payments": paid, "open_reports": open_reports}
 
     # --- API keys
     async def create_key(self, user_id: str, name: str, key_hash: str, webhook_secret: str, key_id: str) -> ApiKey:

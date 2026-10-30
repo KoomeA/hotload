@@ -23,6 +23,7 @@ from ..db import Database
 from ..jobs import BatchStore, JobStore
 from ..proxies import NoProxyAvailable, ProxyPool
 from .accounts import add_account_routes, origin_allowed
+from .admin import RuleCache, add_admin_routes
 from .billing import add_billing_routes
 from .keys import add_key_routes, record_usage
 
@@ -80,6 +81,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         app.state.db = Database(settings)
         await app.state.db.migrate()
         app.state.sessions = auth.Sessions(secret)
+        app.state.rules = RuleCache(app.state.db)
         app.state.http = http_client or httpx.AsyncClient(follow_redirects=False)
         app.state.billing = BillingService(settings, app.state.db, build_providers(settings, app.state.http))
         settings.output_dir.mkdir(parents=True, exist_ok=True)
@@ -136,9 +138,12 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         if url is None:
             return None
         try:
-            return await asyncio.to_thread(security.validate_url, url, settings)
+            clean = await asyncio.to_thread(security.validate_url, url, settings)
         except security.UnsafeURL as exc:
             raise HTTPException(400, str(exc)) from exc
+        if (await app.state.rules.get()).blocks_url(clean):
+            raise HTTPException(451, "This content is not available")
+        return clean
 
     def extract_with_retries(url: str) -> dict:
         """Blocking: try up to `max_attempts` egress routes, rotating proxies on retryable failures."""
@@ -197,6 +202,8 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
             await metrics.inc(app.state.redis, "hotload_extract_total", result="error")
             raise HTTPException(503 if exc.retryable else 422, str(exc)) from exc
         await metrics.inc(app.state.redis, "hotload_extract_total", result="ok", site=str(info.get("site")))
+        if (await app.state.rules.get()).blocks_media(info.get("site"), info.get("id")):
+            raise HTTPException(451, "This content is not available")
         info["adult"] = compliance.is_adult(url, info)
         info["age_gate_required"] = info["adult"] and settings.require_age_gate
         return info
@@ -274,7 +281,8 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
             raise HTTPException(422, str(exc)) from exc
         if data["playlist"]:
             checked = await asyncio.gather(*(asyncio.to_thread(_safe, e["url"]) for e in data["entries"]))
-            data["entries"] = [e for e, ok in zip(data["entries"], checked, strict=True) if ok]
+            rules = await app.state.rules.get()
+            data["entries"] = [e for e, ok in zip(data["entries"], checked, strict=True) if ok and not rules.blocks_url(e["url"])]
             data["count"] = len(data["entries"])
         return data
 
@@ -296,9 +304,12 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         urls = []
         for raw in dict.fromkeys(u.strip() for u in body.urls if u.strip()):
             try:
-                urls.append(await asyncio.to_thread(security.validate_url, raw, settings))
+                clean = await asyncio.to_thread(security.validate_url, raw, settings)
             except security.UnsafeURL as exc:
                 raise HTTPException(400, f"{raw[:80]}: {exc}") from exc
+            if (await app.state.rules.get()).blocks_url(clean):
+                raise HTTPException(451, f"{raw[:80]}: this content is not available")
+            urls.append(clean)
         adults = [precheck(u, body, tier) for u in urls]
         await spend_quota(request, user, tier, len(urls))
         jobs = [await new_job(u, body, adult, user, tier, key=key, webhook_url=hook)
@@ -390,6 +401,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
     add_account_routes(app, settings, client_ip)
     add_billing_routes(app, settings, client_ip)
     add_key_routes(app, settings)
+    add_admin_routes(app, settings, client_ip)
 
     web_dir = settings.web_dir or WEB_DIR
     if web_dir.exists():

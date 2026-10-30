@@ -11,6 +11,7 @@ from arq import Retry, cron
 from arq.connections import RedisSettings
 
 from . import canary, engine, logging_setup, metrics, storage, webhooks
+from .blocklist import Blocklist
 from .config import get_settings
 from .db import Database
 from .jobs import JobStore
@@ -53,6 +54,14 @@ async def run_download(ctx: dict, job_id: str) -> None:
             job.progress = pct
             asyncio.run_coroutine_threadsafe(store.save(job), loop)
 
+    # Re-check takedowns at run time: a rule added after the job was queued must still apply.
+    rules = Blocklist(await ctx["db"].blocked_items()) if "db" in ctx else Blocklist()
+    if rules.blocks_url(job.url):
+        job.state, job.message = "error", "This content is not available"
+        await store.save(job)
+        return
+    blocked_media = frozenset(rules.media)
+
     pool = get_pool()
     tried: set[str] = set()
     error: engine.EngineError | None = None
@@ -74,7 +83,7 @@ async def run_download(ctx: dict, job_id: str) -> None:
                     subtitle_mode=job.subtitle_mode, subtitle_auto=job.subtitle_auto,
                     audio_lang=job.audio_lang, max_duration=job.max_duration,
                     block_adult=settings.require_age_gate and not job.age_confirmed,
-                    progress=on_progress,
+                    blocked_media=blocked_media, progress=on_progress,
                 )
             )
             pool.report(proxy, True)
