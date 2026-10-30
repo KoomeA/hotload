@@ -9,4 +9,7 @@ async def allow(redis: Redis, bucket: str, limit: int, window: int = 60, cost: i
     count = await redis.incrby(key, cost)
     if count == cost:
         await redis.expire(key, window + 1)
-    return count <= limit
+    if count > limit:
+        await redis.decrby(key, cost)  # a refused request must not use up allowance (a batch of 20 with 5 left costs nothing)
+        return False
+    return True

@@ -299,6 +299,8 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
         preset = engine.PRESETS[o.preset]
         if preset.subs_only and not o.subtitle_langs:
             raise HTTPException(400, "Choose at least one subtitle language")
+        if settings.quotas_enabled and o.audio_lang and tier.audio_tracks <= 1:
+            raise HTTPException(403, "Choosing an audio language needs a Premium plan")
         if o.live_minutes:
             if preset.subs_only:
                 raise HTTPException(400, "Live recording cannot be combined with subtitles-only")

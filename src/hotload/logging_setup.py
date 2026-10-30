@@ -22,8 +22,11 @@ class JsonFormatter(logging.Formatter):
 def setup(level: str = "INFO") -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
+    handler._hotload = True  # type: ignore[attr-defined]
     root = logging.getLogger()
-    root.handlers[:] = [handler]
+    # Replace only the handler a previous call installed. Clobbering every root handler would also remove ones this
+    # code did not add (a host application's, or a test harness's log capture).
+    root.handlers[:] = [h for h in root.handlers if not getattr(h, "_hotload", False)] + [handler]
     root.setLevel(level)
     # httpx logs full request URLs at INFO. Telegram puts the bot token in the URL path, so never let it through.
     for noisy in ("httpx", "httpcore"):

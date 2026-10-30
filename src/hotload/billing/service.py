@@ -47,6 +47,9 @@ class BillingService:
         amount = price(self.settings, plan_key, currency)
         if amount is None:
             raise CheckoutRefused(f"{plan.label} is not sold in {currency}")
+        allowed = getattr(prov, "currencies", None)
+        if allowed is not None and currency not in allowed:
+            raise CheckoutRefused(f"{prov.name} cannot take {currency} payments")
         if TIER_RANK.get(effective_tier, 0) > TIER_RANK[plan.tier]:
             raise CheckoutRefused("You already have a higher plan active. Buy this plan after it ends.", 409)
         payment = await self.db.create_payment(user_id=user.id, provider=provider, plan=plan_key,
@@ -64,16 +67,24 @@ class BillingService:
 
     async def apply(self, payment: Payment, verified: Verified) -> Payment:
         """Act on the provider's verified answer. Idempotent."""
-        if payment.status != "pending":
+        if payment.status in ("paid", "held"):
             return payment
         if verified.status == "paid":
             if verified.amount_minor < payment.amount_minor or verified.currency != payment.currency:
-                # Never grant for an amount or currency we did not ask for; leave it pending for a human to look at.
+                # Never grant for an amount or currency we did not ask for; leave it for a human to look at.
                 log(logger, "payment amount mismatch", logging.ERROR, payment=payment.id, expected=payment.amount_minor,
                     got=verified.amount_minor, currency=verified.currency)
                 return payment
-            if await self.db.complete_payment(payment.id):
-                log(logger, "payment completed", payment=payment.id, provider=payment.provider, plan=payment.plan)
+            outcome = await self.db.complete_payment(payment.id)
+            if outcome == "granted":
+                late = payment.status != "pending"
+                log(logger, "payment completed", logging.ERROR if late else logging.INFO, payment=payment.id,
+                    provider=payment.provider, plan=payment.plan, paid_after_close=late)
+            elif outcome == "held":
+                log(logger, "payment HELD: money received but not granted (higher plan active or account gone): "
+                    "refund or credit it", logging.ERROR, payment=payment.id, provider=payment.provider, plan=payment.plan)
+        elif payment.status != "pending":
+            return payment  # an already closed payment that is still unpaid stays closed
         elif verified.status in ("failed", "expired"):
             await self.db.close_payment(payment.id, verified.status)
         elif payment.created < time.time() - PENDING_MAX_AGE:
@@ -81,8 +92,11 @@ class BillingService:
         return await self.db.get_payment(payment.id)
 
     async def refresh(self, payment: Payment) -> Payment:
-        """Ask the provider about a pending payment (used by the return page, so slow webhooks do not matter)."""
-        if payment.status != "pending":
+        """Ask the provider about an unsettled payment (used by the return page, so slow webhooks do not matter).
+
+        Closed (expired/failed) payments are re-checked too: a customer can still pay a BTCPay invoice late or finish a
+        Paystack checkout after our 24 h window, and that money must not vanish."""
+        if payment.status in ("paid", "held"):
             return payment
         prov = self.providers.get(payment.provider)
         if prov is None:

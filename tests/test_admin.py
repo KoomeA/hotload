@@ -239,7 +239,7 @@ def test_overview_counts(c):
     as_admin(c)
     block(c, "host", "example.org")
     o = c.get("/api/v1/admin/overview").json()
-    assert o == {"users": 1, "paid_payments": 0, "open_reports": 1, "blocked": 1}
+    assert o == {"users": 1, "paid_payments": 0, "open_reports": 1, "held_payments": 0, "blocked": 1}
 
 
 # --- blocklist unit -------------------------------------------------------------------------------------

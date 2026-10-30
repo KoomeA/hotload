@@ -12,6 +12,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     delete,
+    event,
     select,
     update,
 )
@@ -162,6 +163,18 @@ class UserCookie(Base):
 class Database:
     def __init__(self, settings: Settings):
         self.engine: AsyncEngine = create_async_engine(settings.db_url)
+        if settings.db_url.startswith("sqlite"):
+            # SQLite ignores SELECT ... FOR UPDATE. Without this, two transactions can both read a user's plan, both
+            # compute a new expiry from it, and the second write silently erases the first (a customer loses days).
+            # BEGIN IMMEDIATE takes the write lock when the transaction starts, so read-modify-write cycles serialise.
+            @event.listens_for(self.engine.sync_engine, "connect")
+            def _no_implicit_begin(dbapi_connection, _record):
+                dbapi_connection.isolation_level = None
+
+            @event.listens_for(self.engine.sync_engine, "begin")
+            def _begin_immediate(conn):
+                conn.exec_driver_sql("BEGIN IMMEDIATE")
+
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
 
     async def create_all(self) -> None:
@@ -269,25 +282,39 @@ class Database:
             await s.commit()
             return res.rowcount == 1
 
-    async def complete_payment(self, payment_id: str, now: float | None = None) -> bool:
-        """Mark a payment paid and grant its plan in ONE transaction.
+    async def complete_payment(self, payment_id: str, now: float | None = None) -> str:
+        """Settle a payment that the provider confirmed. Returns "granted", "held" or "noop".
 
-        Only the pending -> paid transition grants anything, so retried or duplicated webhooks cannot extend a
-        plan twice, and a crash cannot leave a payment paid without its entitlement.
+        One transaction: the payment's status is moved with a compare-and-set, and only the winner touches the user, so
+        replayed webhooks and concurrent confirmations grant exactly once. A payment that closed as expired/failed but
+        was then paid late is still honoured (the customer paid); `held` payments are not.
+
+        "held" = the money arrived but granting would be wrong or impossible (the account is gone, or the user already has
+        a *higher* plan active: extending it with a cheaper plan's days would sell Pro time at Premium prices). Nothing is
+        granted and an operator must refund or credit it; the case is logged at ERROR and counted in the admin overview.
         """
-        from .billing.catalog import PLANS, entitlement_after
+        from .billing.catalog import PLANS, TIER_RANK, entitlement_after
 
         now = now or time.time()
         async with self.session() as s, s.begin():
-            res = await s.execute(update(Payment).where(Payment.id == payment_id, Payment.status == "pending")
-                                  .values(status="paid", paid_at=now))
-            if res.rowcount != 1:
-                return False
             payment = await s.get(Payment, payment_id)
-            user = await s.get(User, payment.user_id)
-            tier, expires = entitlement_after(user.tier, user.tier_expires, PLANS[payment.plan], now)
-            user.tier, user.tier_expires = tier, expires
-            return True
+            if payment is None or payment.status in ("paid", "held"):
+                return "noop"
+            was = payment.status
+            user = (await s.execute(select(User).where(User.id == payment.user_id).with_for_update())).scalar_one_or_none()
+            plan = PLANS[payment.plan]
+            active = (user is not None and user.tier not in ("free", "anonymous")
+                      and (user.tier_expires is None or user.tier_expires > now))
+            hold = user is None or (active and TIER_RANK[user.tier] > TIER_RANK[plan.tier])
+            new_status = "held" if hold else "paid"
+            res = await s.execute(update(Payment).where(Payment.id == payment_id, Payment.status == was)
+                                  .values(status=new_status, paid_at=now))
+            if res.rowcount != 1:
+                return "noop"  # another worker settled it first
+            if hold:
+                return "held"
+            user.tier, user.tier_expires = entitlement_after(user.tier, user.tier_expires, plan, now)
+            return "granted"
 
     async def set_tier(self, user_id: str, tier: str, expires: float | None = None) -> None:
         async with self.session() as s:
@@ -373,7 +400,8 @@ class Database:
             users = (await s.execute(select(func.count()).select_from(User))).scalar_one()
             paid = (await s.execute(select(func.count()).select_from(Payment).where(Payment.status == "paid"))).scalar_one()
             open_reports = (await s.execute(select(func.count()).select_from(Report).where(Report.status == "open"))).scalar_one()
-            return {"users": users, "paid_payments": paid, "open_reports": open_reports}
+            held = (await s.execute(select(func.count()).select_from(Payment).where(Payment.status == "held"))).scalar_one()
+            return {"users": users, "paid_payments": paid, "open_reports": open_reports, "held_payments": held}
 
     # --- API keys
     async def create_key(self, user_id: str, name: str, key_hash: str, webhook_secret: str, key_id: str) -> ApiKey:

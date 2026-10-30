@@ -279,16 +279,29 @@ async def test_send_retries_transient_failures_but_not_permanent_ones(tg):
         assert await notify.telegram_send(http, s, 1, "x") is False  # never raises
 
 
-def test_bot_token_never_reaches_the_logs(make, tg, caplog):
-    logging_setup.setup()  # as the real app does: quiets httpx, whose INFO lines include request URLs
-    with caplog.at_level(logging.DEBUG):
-        c = make()
-        say(c, "/start")
-        say(c, "https://example.com/v")
-        tg.statuses = [403]
-        say(c, "https://example.com/w")
-    assert TOKEN not in caplog.text and TOKEN.split(":")[1] not in caplog.text
+def test_bot_token_never_reaches_the_logs(make, tg, logs):
+    logging_setup.setup()  # as the real app does
+    c = make()
+    say(c, "/start")
+    say(c, "https://example.com/v")
+    tg.statuses = [403]
+    say(c, "https://example.com/w")
+    # positive controls: the capture works, and the bot's own log lines are there
+    assert any("telegram rejected message" in r.getMessage() for r in logs.records)
+    secret = TOKEN.split(":")[1]
+    assert TOKEN not in logs.text and secret not in logs.text
     assert logging.getLogger("httpx").level == logging.WARNING
+
+
+def test_the_httpx_silencing_is_what_keeps_the_token_out(make, tg, logs):
+    """Control: with httpx logging at INFO (its default), the Telegram URL, token included, IS logged."""
+    c = make()
+    logging.getLogger("httpx").setLevel(logging.INFO)
+    try:
+        say(c, "/start")
+    finally:
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+    assert TOKEN in logs.text, "if this fails the token test above no longer proves anything"
 
 
 def test_parsing_helpers():

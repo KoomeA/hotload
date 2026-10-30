@@ -283,17 +283,152 @@ def test_overpayment_still_grants_exact_plan(c, prov):
     assert me(c)["tier"] == "premium"
 
 
-def test_failed_payment_is_closed_and_a_later_success_cannot_resurrect_it(c, prov):
+def test_a_payment_that_closed_but_was_paid_late_is_still_honoured(c, prov, logs):
+    """The customer paid, so the plan must be granted even if our 24h window or the provider's invoice had expired."""
     signed_in(c)
     pid = start(c)
     prov.paystack_verify = {"status": "failed", "amount": 999, "currency": "USD"}
     post_ps(c, ps_event(pid))
-    assert c.get(f"/api/v1/billing/payments/{pid}").json()["status"] == "failed"
+    assert c.get(f"/api/v1/billing/payments/{pid}").json()["status"] == "failed" and me(c)["tier"] == "free"
     prov.paystack_verify = {"status": "success", "amount": 999, "currency": "USD"}
     post_ps(c, ps_event(pid))
-    assert me(c)["tier"] == "free"
+    assert me(c)["tier"] == "premium" and c.get(f"/api/v1/billing/payments/{pid}").json()["status"] == "paid"
+    late = [r for r in logs.records if r.getMessage() == "payment completed"]
+    assert late and late[0].levelno >= 40 and late[0].ctx["paid_after_close"] is True  # ERROR, so ops sees it
+    expiry = me(c)["tier_expires"]
+    post_ps(c, ps_event(pid))
+    assert me(c)["tier_expires"] == expiry  # and still only once
 
 
+def test_still_unpaid_closed_payments_stay_closed(c, prov):
+    signed_in(c)
+    pid = start(c)
+    prov.paystack_verify = {"status": "failed", "amount": 999, "currency": "USD"}
+    post_ps(c, ps_event(pid))
+    post_ps(c, ps_event(pid))
+    assert c.get(f"/api/v1/billing/payments/{pid}").json()["status"] == "failed" and me(c)["tier"] == "free"
+
+
+# --- the verified exploit: Pro time at Premium prices ---------------------------------------------------------------
+
+def test_a_cheaper_plan_cannot_extend_a_higher_plan(c, prov):
+    """Keep an unpaid premium_365 checkout open, buy pro_30, then pay the old checkout: it must NOT add 365 Pro days."""
+    signed_in(c)
+    premium_year = start(c, "paystack", "premium_365")        # step 1: allowed, the user is free right now
+    pro_month = start(c, "paystack", "pro_30")                # step 2
+    prov.paystack_verify = {"status": "success", "amount": 2999, "currency": "USD"}
+    post_ps(c, ps_event(pro_month))
+    after_pro = me(c)
+    assert after_pro["tier"] == "pro"
+    prov.paystack_verify = {"status": "success", "amount": 8399, "currency": "USD"}   # step 3: pay the saved checkout
+    post_ps(c, ps_event(premium_year))
+    final = me(c)
+    assert final["tier"] == "pro" and final["tier_expires"] == after_pro["tier_expires"], "no free Pro days"
+    assert c.get(f"/api/v1/billing/payments/{premium_year}").json()["status"] == "held"   # kept for a human to refund/credit
+    post_ps(c, ps_event(premium_year))
+    assert me(c)["tier_expires"] == after_pro["tier_expires"]  # replays do not change that either
+
+
+def test_held_payments_surface_to_the_operator(make, prov, logs):
+    c = make()
+    uid = signed_in(c)
+    low = start(c, "paystack", "premium_30")
+    c.portal.call(c.app.state.db.set_tier, uid, "pro", time.time() + 5 * DAY)
+    prov.paystack_verify = {"status": "success", "amount": 999, "currency": "USD"}
+    post_ps(c, ps_event(low))
+    held = [r for r in logs.records if "HELD" in r.getMessage()]
+    assert held and held[0].levelno >= 40 and held[0].ctx["payment"] == low
+    c.portal.call(c.app.state.db.set_admin, USER["email"], True)
+    assert c.get("/api/v1/admin/overview").json()["held_payments"] == 1
+
+
+def test_same_plan_renewal_and_real_upgrade_still_work(c, prov):
+    signed_in(c)
+    first = start(c, "paystack", "premium_30")
+    prov.paystack_verify = {"status": "success", "amount": 999, "currency": "USD"}
+    post_ps(c, ps_event(first))
+    t1 = me(c)["tier_expires"]
+    second = start(c, "paystack", "premium_30")
+    post_ps(c, ps_event(second))
+    assert me(c)["tier_expires"] == pytest.approx(t1 + 30 * DAY, abs=2)           # renewing extends
+    up = start(c, "paystack", "pro_30")
+    prov.paystack_verify = {"status": "success", "amount": 2999, "currency": "USD"}
+    post_ps(c, ps_event(up))
+    assert me(c)["tier"] == "pro" and me(c)["tier_expires"] == pytest.approx(time.time() + 30 * DAY, abs=10)  # upgrade switches
+
+
+async def test_payment_for_a_deleted_account_is_held_not_crashed(tmp_path):
+    db = Database(Settings(data_dir=tmp_path))
+    await db.migrate()
+    user = await db.add_user(email="gone@example.com", password_hash="x")
+    payment = await db.create_payment(user_id=user.id, provider="paystack", plan="premium_30", amount_minor=999, currency="USD")
+    await db.delete_user(user.id)
+    assert await db.complete_payment(payment.id) == "held"      # used to raise and leave the customer charged forever
+    assert (await db.get_payment(payment.id)).status == "held"
+    assert await db.complete_payment(payment.id) == "noop"
+    await db.dispose()
+
+
+async def test_two_payments_for_one_user_confirmed_at_once_both_count(tmp_path):
+    db = Database(Settings(data_dir=tmp_path))
+    await db.migrate()
+    user = await db.add_user(email="two@example.com", password_hash="x")
+    ids = [(await db.create_payment(user_id=user.id, provider="paystack", plan="premium_30", amount_minor=999, currency="USD")).id
+           for _ in range(2)]
+    now = time.time()
+    outcomes = await asyncio.gather(*(db.complete_payment(i, now) for i in ids))
+    assert outcomes.count("granted") == 2
+    assert abs((await db.user_by_id(user.id)).tier_expires - (now + 60 * DAY)) < 1  # no lost update
+    await db.dispose()
+
+
+# --- limits and currencies ---------------------------------------------------------------------------------------
+
+async def test_a_refused_request_does_not_use_up_allowance():
+    from hotload import ratelimit
+
+    r = FakeAsyncRedis(decode_responses=True)
+    assert await ratelimit.allow(r, "b", 10, 60, cost=6) is True
+    assert await ratelimit.allow(r, "b", 10, 60, cost=6) is False   # would exceed: refused...
+    assert await ratelimit.allow(r, "b", 10, 60, cost=4) is True    # ...and nothing was charged, so 4 still fit
+    assert await ratelimit.allow(r, "b", 10, 60, cost=1) is False
+
+
+def test_payment_polling_is_rate_limited_per_account(c, prov):
+    signed_in(c)
+    pid = start(c)
+    prov.paystack_verify = {"status": "abandoned", "amount": 999, "currency": "USD"}
+    codes = [c.get(f"/api/v1/billing/payments/{pid}").status_code for _ in range(33)]
+    assert codes[:30] == [200] * 30 and codes[30:] == [429] * 3
+    assert len(prov.sent("/transaction/verify/")) == 30  # the provider was not hit by the refused polls
+
+
+def test_audio_language_is_a_paid_feature_when_plans_are_enforced(make):
+    c = make(quotas_enabled=True)
+    body = {"url": "https://example.com/v", "audio_lang": "es"}
+    assert c.post("/api/v1/jobs", json=body).status_code == 403
+    assert c.post("/api/v1/jobs", json={"url": "https://example.com/v"}).status_code == 202
+    plain = make()
+    assert plain.post("/api/v1/jobs", json=body).status_code == 202  # self-host: unrestricted
+
+
+def test_paystack_only_offers_currencies_with_confirmed_subunits(make):
+    c = make(prices={"KES": {"premium_30": 129900}, "JPY": {"premium_30": 1500}, "XOF": {"premium_30": 6000}})
+    plans = c.get("/api/v1/billing/plans").json()["plans"]
+    opts = {(o["provider"], o["currency"]) for o in next(p for p in plans if p["plan"] == "premium_30")["options"]}
+    assert ("paystack", "KES") in opts and ("paystack", "USD") in opts
+    assert ("paystack", "JPY") not in opts and ("paystack", "XOF") not in opts   # unconfirmed subunits: never offered
+    assert ("btcpay", "JPY") in opts                                             # BTCPay converts exactly, so it may
+    signed_in(c)
+    refused = c.post("/api/v1/billing/checkout", json={"plan": "premium_30", "provider": "paystack", "currency": "JPY"})
+    assert refused.status_code == 400 and "cannot take JPY" in refused.json()["detail"]
+
+
+def test_minor_unit_table_covers_zero_and_three_decimal_currencies():
+    for cur, major in (("JPY", "1500"), ("XOF", "6000"), ("UGX", "9000"), ("BIF", "100")):
+        assert catalog.to_major(int(major), cur) == major
+    assert catalog.to_major(1500, "KWD") == "1.500" and catalog.to_minor("1.500", "KWD") == 1500
+    assert catalog.to_major(999, "USD") == "9.99"
 def test_irrelevant_unknown_and_malformed_events_are_acknowledged_quietly(c, prov):
     signed_in(c)
     start(c)
@@ -409,7 +544,7 @@ async def test_concurrent_completions_grant_exactly_once(tmp_path):
     payment = await db.create_payment(user_id=user.id, provider="paystack", plan="premium_30", amount_minor=999, currency="USD")
     now = time.time()
     results = await asyncio.gather(*(db.complete_payment(payment.id, now) for _ in range(8)))
-    assert results.count(True) == 1
+    assert results.count("granted") == 1
     fresh = await db.user_by_id(user.id)
     assert fresh.tier == "premium" and abs(fresh.tier_expires - (now + 30 * DAY)) < 1
     await db.dispose()

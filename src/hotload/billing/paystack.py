@@ -17,6 +17,9 @@ from .base import Checkout, ProviderError, Verified
 
 class Paystack:
     name = "paystack"
+    # Only currencies whose smallest unit is 1/100 (amounts are sent in subunits). Others are refused until their
+    # subunit handling has been confirmed in Paystack test mode, so a price can never be charged 100x too low.
+    currencies = frozenset({"NGN", "GHS", "ZAR", "KES", "USD"})
 
     def __init__(self, settings: Settings, client: httpx.AsyncClient):
         self.key = settings.paystack_secret_key or ""

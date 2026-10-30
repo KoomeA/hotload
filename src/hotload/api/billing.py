@@ -36,9 +36,9 @@ def add_billing_routes(app: FastAPI, settings: Settings, client_ip) -> None:
         offers = []
         for plan in catalog.PLANS.values():
             options = [{"provider": name, "currency": cur, "amount_minor": amount}
-                       for name in service().providers
+                       for name, prov in service().providers.items()
                        for cur, table in catalog.prices(settings).items()
-                       if (amount := table.get(plan.key))]
+                       if (amount := table.get(plan.key)) and cur in (getattr(prov, "currencies", None) or {cur})]
             if options:
                 offers.append({"plan": plan.key, "tier": plan.tier, "days": plan.days, "label": plan.label,
                                "options": options})
@@ -71,11 +71,17 @@ def add_billing_routes(app: FastAPI, settings: Settings, client_ip) -> None:
 
     @app.get("/api/v1/billing/payments/{payment_id}")
     async def payment_status(payment_id: str, request: Request):
+        user = await require_user(request)
+        # Each poll can call the provider's API, so one account must not be able to burn the operator's API quota.
+        if not await ratelimit.allow(app.state.redis, f"paypoll:{user.id}", 30, 60):
+            raise HTTPException(429, "Too many requests, slow down")
         payment = await service().refresh(await owned(request, payment_id))
         return payment.public()
 
     @app.post("/api/v1/billing/webhooks/{provider}")
     async def webhook(provider: str, request: Request):
+        if not await ratelimit.allow(app.state.redis, f"webhook:{client_ip(request)}", 600, 60):
+            raise HTTPException(429, "Too many requests")
         body = await request.body()  # raw bytes: the signature covers exactly these
         if len(body) > 64_000:
             raise HTTPException(413, "Payload too large")

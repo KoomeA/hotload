@@ -32,7 +32,10 @@ DEFAULT_PRICES: dict[str, dict[str, int]] = {
 }
 
 # Currencies whose minor unit is not 1/100 (extend as needed when adding prices for them).
-_EXPONENT = {"JPY": 0, "KRW": 0, "UGX": 0, "RWF": 0, "XOF": 0, "XAF": 0, "CLP": 0, "VND": 0}
+_EXPONENT = {
+    **dict.fromkeys(("JPY", "KRW", "UGX", "RWF", "XOF", "XAF", "CLP", "VND", "BIF", "DJF", "GNF", "KMF", "MGA", "PYG", "VUV", "XPF"), 0),
+    **dict.fromkeys(("BHD", "KWD", "OMR", "JOD", "TND", "IQD", "LYD"), 3),
+}
 
 
 def exponent(currency: str) -> int:
@@ -65,7 +68,8 @@ def entitlement_after(current_tier: str, current_expires: float | None, plan: Pl
 
     - Same plan still active: extends from the current expiry (renewing early loses nothing).
     - Higher plan than the active one: switches immediately for the full period (no proration).
-    - Lower plan than the active one (only possible via a race; checkout refuses it): the days extend the higher plan.
+    - Lower plan than the active one: NOT handled here. `Database.complete_payment` holds such a payment for review
+      instead of calling this, because extending the higher plan would sell its days at the lower plan's price.
     - Manual perpetual grants (expiry None) stay perpetual.
     """
     active = current_tier not in ("free", "anonymous") and (current_expires is None or current_expires > now)
