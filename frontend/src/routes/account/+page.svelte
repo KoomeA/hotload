@@ -3,6 +3,7 @@
   import CookiesSection from '#lib/components/CookiesSection.svelte';
   import KeysSection from '#lib/components/KeysSection.svelte';
   import PlansSection from '#lib/components/PlansSection.svelte';
+  import RecordingsSection from '#lib/components/RecordingsSection.svelte';
   import { ApiError, api } from '#lib/api.js';
   import { t } from '#lib/i18n.svelte.js';
   import { refreshSession, session } from '#lib/session.svelte.js';
@@ -13,7 +14,7 @@
   let error = $state('');
   let notice = $state('');
   let busy = $state(false);
-  let providers = $state({ password: true, oauth: [] });
+  let providers = $state({ password: true, oauth: [], email: false });
   let history = $state([]);
   let me = $state(null);
   let deletePassword = $state('');
@@ -59,6 +60,16 @@
       fail(e);
     } finally {
       busy = false;
+    }
+  }
+
+  async function resendVerification() {
+    error = notice = '';
+    try {
+      await api('/api/v1/auth/verify/send', { method: 'POST' });
+      notice = t('auth.verify.sent');
+    } catch (e) {
+      fail(e);
     }
   }
 
@@ -116,6 +127,7 @@
         </div>
       </div>
       <div class="row"><button type="submit" disabled={busy}>{tab === 'in' ? t('sign_in') : t('sign_up')}</button></div>
+      {#if tab === 'in' && providers.email}<p><a href="/account/reset/">{t('auth.forgot')}</a></p>{/if}
     </form>
     {#if providers.oauth.length}
       <p class="muted" style="margin-top: 16px">{t('oauth.or')}</p>
@@ -129,6 +141,10 @@
 {:else}
   <section class="card">
     <p><strong>{session.user.email}</strong></p>
+    {#if me && !me.email_verified && providers.email}
+      <p class="muted">{t('auth.verify.banner', { email: me.email })}</p>
+      <div class="row"><button class="secondary" onclick={resendVerification}>{t('auth.verify.resend')}</button></div>
+    {/if}
     {#if me}
       <h2>{t('plan.title')}</h2>
       <p>{t('plan.name', { tier: me.tier })}</p>
@@ -146,6 +162,8 @@
   <PlansSection {me} onchange={load} />
 
   {#if me}<KeysSection {me} />{/if}
+
+  {#if me}<RecordingsSection {me} />{/if}
 
   <CookiesSection />
 

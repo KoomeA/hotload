@@ -11,7 +11,7 @@ import httpx
 from arq import Retry, cron
 from arq.connections import RedisSettings
 
-from . import canary, engine, logging_setup, metrics, notify, storage, webhooks
+from . import canary, engine, logging_setup, mail, metrics, notify, scheduler, storage, webhooks
 from .blocklist import Blocklist
 from .config import get_settings
 from .cookies import CookieVault
@@ -137,13 +137,15 @@ async def _run_download(ctx: dict, job, cookie_path) -> None:
         remote = ctx.get("remote")
         if remote is not None:
             try:  # object storage: upload, then drop the local copy so workers stay stateless
-                job.storage_key = await asyncio.to_thread(remote.put, job.id, path)
+                job.storage_key = await asyncio.to_thread(remote.put, job.id, path, bool(job.retention))
                 shutil.rmtree(storage.job_dir(settings.output_dir, job.id), ignore_errors=True)
             except storage.StorageError as exc:
                 error, path = engine.EngineError(str(exc)), None
                 logger.exception("upload failed", extra={"ctx": {"job": job.id}})
         else:
             job.path = str(path)
+            if job.retention:  # a scheduled recording finishes while nobody is watching: keep it longer than the usual hour
+                storage.mark_keep(settings.output_dir, job.id, time.time() + job.retention)
     if path is not None and error is None:
         job.state, job.progress, job.message = "done", 100.0, "Ready"
     else:
@@ -157,8 +159,12 @@ async def _run_download(ctx: dict, job, cookie_path) -> None:
         except Exception:  # noqa: BLE001 - history is best-effort; never fail a finished download over it
             logger.exception("history update failed", extra={"ctx": {"job": job.id}})
 
+    if job.live_seconds:
+        await redis.zrem(scheduler.RUNNING, job.id)  # frees its place in the scheduled-recordings-running count
     if job.notify and ctx.get("http") is not None:
         await notify.notify_finished(ctx["http"], settings, job)
+    if (job.notify or {}).get("kind") == "email":
+        await scheduler.notify_owner(ctx, job)
 
     if job.webhook_url and job.key_id:
         extra = {"_queue_name": ctx["queue_name"]} if ctx.get("queue_name") else {}
@@ -208,7 +214,8 @@ async def cleanup(ctx: dict) -> None:
     s = get_settings()
     removed = storage.cleanup_expired(s.output_dir, s.file_ttl_seconds)
     if ctx.get("remote") is not None:
-        removed += await asyncio.to_thread(ctx["remote"].cleanup_expired, s.file_ttl_seconds)
+        removed += await asyncio.to_thread(ctx["remote"].cleanup_expired, s.file_ttl_seconds,
+                                           keep_ttl_seconds=s.scheduled_keep_hours * 3600)
     if removed:
         log(logger, "expired job files removed", count=removed)
 
@@ -217,6 +224,13 @@ async def run_canaries(ctx: dict) -> None:
     s = get_settings()
     if s.canary_enabled:
         await canary.run_and_record(ctx["redis_client"], s, get_pool())
+
+
+async def release_schedules(ctx: dict) -> None:
+    if get_settings().scheduled_enabled:
+        stats = await scheduler.release_due(ctx)
+        if stats["queued"] or stats["missed"] or stats["failed"]:
+            log(logger, "schedules processed", **stats)
 
 
 async def startup(ctx: dict) -> None:
@@ -234,6 +248,8 @@ async def startup(ctx: dict) -> None:
     ctx["db"] = Database(s)
     await ctx["db"].migrate()
     ctx["vault"] = CookieVault(s, ctx["db"])
+    ctx["pool"] = get_pool()
+    ctx["mailer"] = mail.build(s)
 
 
 async def shutdown(ctx: dict) -> None:
@@ -247,6 +263,7 @@ class WorkerSettings:
     cron_jobs = [
         cron(cleanup, minute={0, 10, 20, 30, 40, 50}),
         cron(run_canaries, minute={5, 20, 35, 50}, run_at_startup=True, timeout=600),
+        cron(release_schedules, second={0, 30}, timeout=25),
     ]
     on_startup = startup
     on_shutdown = shutdown

@@ -334,3 +334,11 @@ def test_admin_registers_the_webhook(monkeypatch):
     assert len(calls) == 1
 
 
+
+
+def test_many_throwaway_chats_cannot_add_up_to_unlimited_work(make):
+    """Each chat is within its own limit, but the bot as a whole stops at 300 requests a minute."""
+    c = make()
+    for chat in range(1, 306):
+        say(c, f"https://example.com/{chat}", chat=chat)
+    assert len(c.queued) == 300

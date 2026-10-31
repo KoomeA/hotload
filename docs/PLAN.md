@@ -41,41 +41,49 @@ Code layout (`src/hotload`):
   own traffic (`netguard`), validation of every URL handed to FFmpeg, and a network-layer egress filter overlay for FFmpeg.
 - [x] Metrics (`/metrics`, Prometheus text) and structured JSON logs.
 - [x] yt-dlp pinned (`constraints.txt`) with a daily bump PR gated by tests + canary.
-- [ ] Still open: per-container resource limits/seccomp, FFmpeg wall-clock timeouts, canary run from the deployed
-  environment in CI, alert rules shipped as code, S3-shared proxy health.
+- [x] Containers: memory/CPU/pids limits, `cap_drop: ALL`, `no-new-privileges`, read-only API filesystem (Docker's default seccomp profile applies).
+- [x] Wall-clock bounds: download watchdog, FFmpeg `-t`/`-rw_timeout`, and the worker's job timeout (5400 s) as the backstop.
+- [ ] Still open: a custom seccomp profile, a dedicated wall-clock timeout for post-processing FFmpeg (only the job timeout covers it),
+  canary run from the deployed environment in CI, alert rules shipped as code, S3-shared proxy health.
 
 ### M2: Product (weeks 3-6) - implemented
 - [x] SvelteKit PWA (static build served by the API): share target, installable, 6 languages, dark mode, a11y basics.
 - [x] Trim scrubber (audio and video), subtitles (SRT/VTT, embedded or separate, auto-captions, subtitles-only),
   multi-audio-track selection, playlist expansion and batches with a streamed ZIP.
 - [x] Accounts (email+password, GitHub/Google), history, plan limits (see docs/ACCOUNTS.md).
-- [ ] Still open: email verification and password reset (needs a mail provider), Alembic migrations, live OAuth test,
-  native-speaker review of the es/fr/de/pt/sw translations, PWA offline page, axe/Lighthouse audits in CI,
-  proxying thumbnails (they currently load from the origin site and reveal the visitor's IP to it).
+- [x] Offline app shell (service worker) and signed thumbnail proxy (the browser never contacts the origin site).
+- [x] Email verification and password reset (SMTP; browser-tested against a local sink, not a real provider).
+- [ ] Still open: live OAuth test, a real SMTP run (+ SPF/DKIM/DMARC),
+  native-speaker review of the es/fr/de/pt/sw translations, axe/Lighthouse audits in CI.
 
 ### M3: Monetization and scale - backend implemented (see docs/PAYMENTS.md, docs/SCALING.md)
 - [x] Processor research and decision (Paystack's policy conflicts with adult/download content: needs written approval).
 - [x] Provider-agnostic billing, Paystack and BTCPay (crypto) providers, prepaid passes, verified idempotent webhooks.
-- [x] Alembic migrations (0001-0003).
+- [x] Alembic migrations (0001-0005).
 - [x] API keys, usage metering, signed job webhooks (SSRF-safe, IP-pinned).
 - [x] Abuse tooling: public reports, admin blocklist/takedown (host, URL, media id), manual plan grants.
 - [x] S3/R2 storage backend and priority queues.
 - [ ] Not live-tested: Paystack and BTCPay (tests use faithful fakes), S3 (tests use moto), priority pools under load.
-- [ ] Still open: adult-friendly card processor module (CCBill/Segpay/Verotel after quotes), refunds/chargeback handling,
-  invoices/receipts by email (needs mail provider), tax (VAT) handling, queue-depth metric, autoscaling rules.
+- [x] Refunds, disputes and chargebacks: audited state machine, admin console, Paystack refund API and signed webhooks (docs/PAYMENTS.md section 5; not run against Paystack).
+- [ ] Still open: adult-friendly card processor module (CCBill/Segpay/Verotel after quotes), partial refunds,
+  receipts/refund emails to customers, tax (VAT) handling, queue-depth metric, autoscaling rules.
 
 ### M4: Differentiators - implemented (see docs/COOKIES.md, docs/BOTS.md, extension/README.md)
 - [x] SponsorBlock (mark/remove), live-stream recording (FFmpeg-capped, plan-limited), encrypted saved cookies.
 - [x] Chromium extension (MV3, minimal permissions) and a drag-to-bookmarks bookmarklet; share-target already existed.
 - [x] Telegram bot (webhook, per-chat limits, 18+ confirmation, link replies).
-- [ ] Not built: Discord bot, scheduled "record at time X"/wait-for-upcoming (would pin a worker for hours), Firefox/Safari
-  extension builds and store listings, extension context-menu test (native menus cannot be driven by the test harness),
+- [x] Firefox build (`extension/build.mjs`): same code, event-page manifest; browser-tested in real Firefox 159 (8 steps).
+- [x] Discord bot (signed interactions webhook, slash commands, private replies; docs/BOTS.md; not run against live Discord).
+- [x] Scheduled recording / wait-for-upcoming (docs/SCHEDULING.md): database-backed, no worker held while waiting, capped; never run against a real live stream.
+- [ ] Not built: Safari build,
+  store listings (the Firefox id is a placeholder until you choose one), extension context-menu click test (native menus cannot be driven by the test harness),
   localised extension UI, sending files (not just links) through Telegram.
 - [ ] Not verified end to end: SponsorBlock against real YouTube segments (options and postprocessor definitions are tested,
-  the live fetch was blocked from the test environment), the Telegram bot against the real Telegram API.
+  the live fetch was blocked from the test environment), the Telegram and Discord bots against the real APIs.
 
 ### Launch readiness (2026-10-30) - review done, gates remain (see docs/LAUNCH.md)
 - [x] Four independent security reviews; every finding verified, fixed with regression tests, or recorded as accepted.
 - [x] `python -m hotload.preflight` checks a deployment's configuration; drafts of Terms/Privacy/DMCA/Refund in docs/legal.
-- [ ] Gates only you can pass: legal review, payment-processor decisions, staging with the hardened Compose overlay (never run),
-  real Paystack/BTCPay/S3/OAuth/Telegram runs, email verification and password reset, load testing (none done).
+- [x] Checklist run (2026-10-31): PostgreSQL migrations/suite/restore drill and the egress proxy's deny rules were run for real; four bugs found and fixed (docs/LAUNCH.md 2a).
+- [ ] Gates only you can pass: legal review, payment-processor decisions, staging with the full hardened Compose overlay (only its egress proxy has been run),
+  real Paystack/BTCPay/S3/OAuth/Telegram/SMTP runs, load testing (none done).

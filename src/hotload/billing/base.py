@@ -35,3 +35,14 @@ class Provider(Protocol):
         """Return (our payment id, provider ref) named in a webhook, or (None, None) for events we ignore."""
 
     async def verify(self, payment) -> Verified: ...
+
+
+class SupportsRefunds(Protocol):
+    """Optional: providers that can refund through their API, and/or report refunds and disputes by webhook."""
+
+    async def refund(self, payment) -> str:
+        """Refund the payment in full at the provider. Returns the provider's refund reference."""
+
+    def reversal(self, body: bytes) -> tuple[str, str] | None:
+        """(kind, our payment id) for a signed webhook about a refund or dispute, else None.
+        kind is "refund", "dispute_opened" or "dispute_resolved"."""

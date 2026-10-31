@@ -13,6 +13,8 @@
   let block = $state({ kind: 'host', value: '', reason: '' });
   let grant = $state({ email: '', tier: 'premium', days: 30 });
   let take = $state({}); // per-report takedown choice: {kind, value}
+  let review = $state([]); // payments that need a decision: held and disputed
+  let act = $state({}); // per-payment form state: {note, provider}
 
   onMount(load);
 
@@ -27,6 +29,10 @@
       // Build the per-report form state BEFORE the reports are rendered, or the template reads undefined.
       take = Object.fromEntries(open.map((r) => [r.id, { on: false, kind: 'host', value: hostOf(r.url) }]));
       reports = open;
+      const pays = await api('/api/v1/admin/payments');
+      // Keep what is being typed in the other rows: a reload after one action must not reset them.
+      act = Object.fromEntries(pays.map((p) => [p.id, act[p.id] ?? { note: '', provider: p.provider === 'paystack' }]));
+      review = pays;
     } catch (e) {
       allowed = false;
       if (!(e instanceof ApiError) || ![401, 403].includes(e.status)) fail(e);
@@ -50,6 +56,23 @@
         body: { status, block: status === 'actioned' && t.on ? { kind: t.kind, value: t.value, reason: `report ${r.id}` } : null }
       });
       notice = `Report ${status}.`;
+      await load();
+    } catch (e) {
+      fail(e);
+    }
+  }
+
+  const money = (p) => `${(p.amount_minor / 100).toFixed(2)} ${p.currency}`;
+
+  async function payAction(p, action, confirmText) {
+    error = notice = '';
+    if (confirmText && !confirm(confirmText)) return;
+    try {
+      const r = await api(`/api/v1/admin/payments/${p.id}/${action}`, {
+        method: 'POST',
+        body: { note: act[p.id].note, through_provider: action === 'refund' && act[p.id].provider }
+      });
+      notice = `${action.replace('-', ' ')}: ${r.status}${r.entitlement !== 'none' ? ` (plan: ${r.entitlement.replaceAll('_', ' ')})` : ''}.`;
       await load();
     } catch (e) {
       fail(e);
@@ -97,7 +120,36 @@
   <section class="card">
     <h2>Overview</h2>
     <p>{overview.users} users · {overview.paid_payments} paid payments · {overview.blocked} block rules ·
-      <strong>{overview.open_reports} open reports</strong></p>
+      <strong>{overview.open_reports} open reports</strong> ·
+      <strong class:err={overview.held_payments + overview.disputed_payments > 0}>{overview.held_payments} held, {overview.disputed_payments} disputed payments</strong></p>
+  </section>
+
+  <section class="card" id="payments">
+    <h2>Payments needing a decision</h2>
+    <p class="muted">Held: money arrived but no plan was granted. Disputed: the customer's bank opened a chargeback, so the plan is
+      suspended until you record the outcome. Refunds through Paystack move the money; for anything else, refund it where you
+      hold the money first, then record it here.</p>
+    {#if !review.length}<p class="muted">Nothing needs a decision.</p>{/if}
+    {#each review as p (p.id)}
+      <article class="report">
+        <p><strong class:err={p.status === 'disputed'}>{p.status}</strong> · {p.email ?? 'deleted account'} · {p.plan} · {money(p)} ·
+          {p.provider} · <span class="muted">{new Date(p.created * 1000).toLocaleString()}</span></p>
+        <p class="url">{p.id}</p>
+        <div class="row">
+          <input class="grow" type="text" maxlength="250" placeholder="Note (kept in the audit trail)" aria-label={`Note for ${p.id}`} bind:value={act[p.id].note} />
+        </div>
+        <div class="row">
+          {#if p.provider === 'paystack'}
+            <label class="inline"><input type="checkbox" bind:checked={act[p.id].provider} /> Refund through Paystack</label>
+          {/if}
+          <button onclick={() => payAction(p, 'refund', 'Refund this payment and take the plan days back?')}>Refund</button>
+          {#if p.status === 'disputed'}
+            <button class="secondary" onclick={() => payAction(p, 'dispute-won')}>Dispute won: restore plan</button>
+            <button class="danger" onclick={() => payAction(p, 'chargeback', 'Record this as a lost chargeback?')}>Dispute lost</button>
+          {/if}
+        </div>
+      </article>
+    {/each}
   </section>
 
   <section class="card">

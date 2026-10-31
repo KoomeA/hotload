@@ -46,6 +46,36 @@ class Sessions:
         return (uid, int(data.get("ep", 0))) if isinstance(uid, str) else None
 
 
+class Tokens:
+    """Stateless, purpose-bound, expiring tokens for email links (verify address, reset password).
+
+    Each token is signed with its own salt, so a token for one purpose is useless for another, and carries a `binding`
+    string the caller must compare with current state: a reset token is bound to a fingerprint of the password hash, so
+    it stops working the moment the password changes (single use) and a verify token to the address it was sent to.
+    """
+
+    def __init__(self, secret: str):
+        self.secret = secret or secrets.token_urlsafe(48)
+
+    def issue(self, purpose: str, user_id: str, binding: str) -> str:
+        return URLSafeTimedSerializer(self.secret, salt=f"hotload-{purpose}").dumps({"uid": user_id, "b": binding})
+
+    def read(self, purpose: str, token: str | None, max_age: int) -> tuple[str, str] | None:
+        if not token or len(token) > 1024:
+            return None
+        try:
+            data = URLSafeTimedSerializer(self.secret, salt=f"hotload-{purpose}").loads(token, max_age=max_age)
+        except BadSignature:
+            return None
+        if not isinstance(data, dict) or not isinstance(data.get("uid"), str) or not isinstance(data.get("b"), str):
+            return None
+        return data["uid"], data["b"]
+
+
+def fingerprint(value: str | None) -> str:
+    return hashlib.sha256((value or "").encode()).hexdigest()[:24]
+
+
 def safe_equal(a: str | None, b: str | None) -> bool:
     """Constant-time string comparison that cannot raise on non-ASCII input (compare_digest on str can)."""
     return hmac.compare_digest((a or "").encode("utf-8", "ignore"), (b or "").encode("utf-8", "ignore"))

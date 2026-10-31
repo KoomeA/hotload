@@ -5,12 +5,12 @@ import re
 from urllib.parse import urlsplit
 
 from email_validator import EmailNotValidError, validate_email
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
-from .. import auth, oauth, ratelimit, tiers
+from .. import auth, mail, oauth, ratelimit, tiers
 from ..config import Settings
 from ..logging_setup import log
 
@@ -20,6 +20,23 @@ logger = logging.getLogger("hotload.accounts")
 class Credentials(BaseModel):
     email: str = Field(max_length=320)
     password: str = Field(min_length=1, max_length=128)
+
+
+class Token(BaseModel):
+    token: str = Field(max_length=1024)
+
+
+class Forgot(BaseModel):
+    email: str = Field(max_length=320)
+
+
+class Reset(BaseModel):
+    token: str = Field(max_length=1024)
+    password: str = Field(min_length=1, max_length=128)
+
+
+VERIFY_MAX_AGE = 3 * 24 * 3600
+RESET_MAX_AGE = 3600
 
 
 class DeleteAccount(BaseModel):
@@ -66,14 +83,85 @@ def add_account_routes(app: FastAPI, settings: Settings, client_ip) -> None:
         return {"id": user.id, "email": user.email, "tier": tiers.effective_name(user),
                 "tier_expires": user.tier_expires if tiers.effective_name(user) != "free" else None,
                 "is_admin": bool(user.is_admin), "has_password": bool(user.password_hash),
+                "email_verified": bool(user.email_verified),
                 "provider": user.oauth_provider, "limits": _limits(t)}
 
     def _limits(t: tiers.Tier) -> dict:
         return {"jobs_per_12h": t.jobs_per_window, "max_minutes": t.max_duration // 60, "batch_size": t.batch_size,
-                "trim_video": t.trim_video, "audio_tracks": t.audio_tracks, "enforced": settings.quotas_enabled}
+                "trim_video": t.trim_video, "audio_tracks": t.audio_tracks, "enforced": settings.quotas_enabled,
+                "live_minutes": t.live_minutes if settings.quotas_enabled else settings.max_live_minutes,
+                "scheduled": (t.scheduled_max if settings.quotas_enabled else settings.max_scheduled_per_user)
+                if settings.scheduled_enabled else 0}
+
+    def link(path: str, token: str) -> str:
+        # The token sits in the URL fragment: browsers never send it to servers, proxies, logs or Referer headers.
+        return f"{settings.public_url.rstrip('/')}{path}#token={token}"
+
+    def queue_verification(background: BackgroundTasks, user) -> None:
+        mailer = app.state.mailer
+        if mailer is None or user.email_verified:
+            return
+        token = app.state.tokens.issue("verify", user.id, user.email)
+        background.add_task(mailer.send, user.email, *mail.verify_message(link("/account/verify/", token)))
+
+    @app.post("/api/v1/auth/verify/send", status_code=202)
+    async def send_verification(request: Request, background: BackgroundTasks):
+        user = await require_user(request)
+        if app.state.mailer is None:
+            raise HTTPException(503, "Email is not set up on this server")
+        if user.email_verified:
+            return {"sent": False, "verified": True}
+        if not await ratelimit.allow(app.state.redis, f"verifysend:{user.id}", 5, 3600):
+            raise HTTPException(429, "Too many requests, try again later")
+        queue_verification(background, user)
+        return {"sent": True, "verified": False}
+
+    @app.post("/api/v1/auth/verify")
+    async def verify_email(body: Token, request: Request):
+        # POST, not GET: link scanners and prefetchers open links, and must not be able to consume or trigger anything.
+        if not await ratelimit.allow(app.state.redis, f"verify:{client_ip(request)}", 30, 900):
+            raise HTTPException(429, "Too many attempts, try again later")
+        read = app.state.tokens.read("verify", body.token, VERIFY_MAX_AGE)
+        if read is None or not await app.state.db.mark_email_verified(read[0], read[1]):
+            raise HTTPException(400, "This link is invalid or has expired")
+        return {"verified": True}
+
+    @app.post("/api/v1/auth/password/forgot", status_code=202)
+    async def forgot_password(body: Forgot, request: Request, background: BackgroundTasks):
+        if app.state.mailer is None:
+            raise HTTPException(503, "Password reset is not available on this server")
+        ip = client_ip(request)
+        try:
+            email = _email(body.email)
+        except HTTPException:
+            email = None
+        # Every outcome returns the same answer, so this cannot be used to learn which addresses have accounts.
+        allowed = await ratelimit.allow(app.state.redis, f"forgotip:{ip}", 10, 3600)
+        if email and allowed and await ratelimit.allow(app.state.redis, f"forgot:{email}", 3, 3600):
+            user = await app.state.db.user_by_email(email)
+            if user is not None and user.password_hash:  # sign-in-with-provider accounts have no password to reset
+                token = app.state.tokens.issue("reset", user.id, auth.fingerprint(user.password_hash))
+                background.add_task(app.state.mailer.send, user.email, *mail.reset_message(link("/account/reset/", token)))
+        return {"ok": True}
+
+    @app.post("/api/v1/auth/password/reset")
+    async def reset_password(body: Reset, request: Request, response: Response):
+        if not await ratelimit.allow(app.state.redis, f"reset:{client_ip(request)}", 20, 900):
+            raise HTTPException(429, "Too many attempts, try again later")
+        if len(body.password) < 10:
+            raise HTTPException(422, "Password must be at least 10 characters")
+        read = app.state.tokens.read("reset", body.token, RESET_MAX_AGE)
+        user = await app.state.db.user_by_id(read[0]) if read else None
+        if user is None or not user.password_hash or not auth.safe_equal(read[1], auth.fingerprint(user.password_hash)):
+            raise HTTPException(400, "This link is invalid or has expired")
+        if not await app.state.db.reset_password(user.id, user.password_hash, auth.hash_password(body.password)):
+            raise HTTPException(400, "This link is invalid or has expired")  # lost a race with another use of the same link
+        # Every earlier session ended (epoch bump); sign this browser in fresh.
+        set_cookie(response, await app.state.db.user_by_id(user.id))
+        return {"ok": True}
 
     @app.post("/api/v1/auth/register", status_code=201)
-    async def register(body: Credentials, request: Request, response: Response):
+    async def register(body: Credentials, request: Request, response: Response, background: BackgroundTasks):
         if not settings.registration_open:
             raise HTTPException(403, "Registration is closed")
         if not await ratelimit.allow(app.state.redis, f"reg:{client_ip(request)}", 5, 3600):
@@ -86,6 +174,7 @@ def add_account_routes(app: FastAPI, settings: Settings, client_ip) -> None:
         except IntegrityError:
             raise HTTPException(409, "An account with this email already exists") from None
         set_cookie(response, user)
+        queue_verification(background, user)
         return view(user)
 
     @app.post("/api/v1/auth/login")
@@ -148,7 +237,8 @@ def add_account_routes(app: FastAPI, settings: Settings, client_ip) -> None:
 
     @app.get("/api/v1/auth/providers")
     async def providers():
-        return {"password": settings.registration_open, "oauth": oauth.enabled(settings)}
+        return {"password": settings.registration_open, "oauth": oauth.enabled(settings),
+                "email": app.state.mailer is not None}
 
     def callback_url(request: Request, provider: str) -> str:
         base = (settings.public_url or str(request.base_url)).rstrip("/")
@@ -175,18 +265,19 @@ def add_account_routes(app: FastAPI, settings: Settings, client_ip) -> None:
         user = await db.user_by_oauth(provider, profile.sub)
         if user is None:
             existing = await db.user_by_email(profile.email)  # linking is safe: the provider verified this email
-            if existing and existing.password_hash:
+            if existing and existing.password_hash and not existing.email_verified:
                 # Pre-hijack defence: someone else may have registered this address with a password they know.
                 await db.take_over_for_oauth(existing.id, provider, profile.sub)
                 user = await db.user_by_id(existing.id)
                 log(logger, "oauth took over a password account", logging.WARNING, user=existing.id, provider=provider)
-            elif existing:
+            elif existing:  # no password, or a password whose owner already proved the mailbox: keep both ways in
                 await db.link_oauth(existing.id, provider, profile.sub)
                 user = existing
             elif not settings.registration_open:
                 return RedirectResponse("/account/?error=closed", status_code=303)
             else:
-                user = await db.add_user(email=profile.email, oauth_provider=provider, oauth_sub=profile.sub)
+                user = await db.add_user(email=profile.email, oauth_provider=provider, oauth_sub=profile.sub,
+                                         email_verified=True)
         response = RedirectResponse("/", status_code=303)
         set_cookie(response, user)
         return response

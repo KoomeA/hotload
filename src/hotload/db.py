@@ -13,6 +13,7 @@ from sqlalchemy import (
     UniqueConstraint,
     delete,
     event,
+    func,
     select,
     update,
 )
@@ -49,6 +50,7 @@ class User(Base):
     tier_expires: Mapped[float | None] = mapped_column(Float, nullable=True)  # None = never (manual grants)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)  # set only from the server CLI, never by email
     session_epoch: Mapped[int] = mapped_column(Integer, default=0)  # bump to revoke every existing session
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False)  # True once the owner proved the mailbox (link or OAuth)
     oauth_provider: Mapped[str | None] = mapped_column(String(16), nullable=True)
     oauth_sub: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created: Mapped[float] = mapped_column(Float, default=time.time)
@@ -83,7 +85,8 @@ class Payment(Base):
     plan: Mapped[str] = mapped_column(String(24))
     amount_minor: Mapped[int] = mapped_column(Integer)
     currency: Mapped[str] = mapped_column(String(3))
-    status: Mapped[str] = mapped_column(String(10), default="pending")  # pending | paid | failed | expired
+    # pending | paid | failed | expired | held | refunded | disputed | chargedback (see PAYMENT_SETTLED)
+    status: Mapped[str] = mapped_column(String(12), default="pending")
     provider_ref: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     created: Mapped[float] = mapped_column(Float, default=time.time)
     paid_at: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -91,6 +94,55 @@ class Payment(Base):
     def public(self) -> dict:
         return {"id": self.id, "provider": self.provider, "plan": self.plan, "amount_minor": self.amount_minor,
                 "currency": self.currency, "status": self.status, "created": self.created, "paid_at": self.paid_at}
+
+
+# Statuses in which the money has been dealt with (or is being): the provider's "paid" answer must never grant again.
+PAYMENT_SETTLED = frozenset({"paid", "held", "refunded", "disputed", "chargedback"})
+
+
+class PaymentEvent(Base):
+    """Append-only audit trail of what happened to a payment after it was paid (who, what, why)."""
+
+    __tablename__ = "payment_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    payment_id: Mapped[str] = mapped_column(String(32), index=True)
+    at: Mapped[float] = mapped_column(Float, default=time.time)
+    kind: Mapped[str] = mapped_column(String(24))  # refund | dispute | dispute_won | dispute_resolved | chargeback
+    actor: Mapped[str] = mapped_column(String(64))  # an admin's user id, or "provider:<name>"
+    from_status: Mapped[str] = mapped_column(String(12))
+    to_status: Mapped[str] = mapped_column(String(12))
+    entitlement: Mapped[str] = mapped_column(String(32), default="none")  # what happened to the user's plan
+    note: Mapped[str] = mapped_column(String(300), default="")
+
+    def public(self) -> dict:
+        return {"at": self.at, "kind": self.kind, "actor": self.actor, "from": self.from_status, "to": self.to_status,
+                "entitlement": self.entitlement, "note": self.note}
+
+
+class Schedule(Base):
+    """A recording that will start when a stream goes live. It waits here, in the database: no worker is held meanwhile."""
+
+    __tablename__ = "scheduled_recordings"
+    __table_args__ = (Index("ix_sched_state_start", "state", "start_at"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(String(32), index=True)
+    url: Mapped[str] = mapped_column(String(2048))
+    start_at: Mapped[float] = mapped_column(Float)  # planned start; the stream is polled from here on
+    minutes: Mapped[int] = mapped_column(Integer)
+    preset: Mapped[str] = mapped_column(String(16))
+    adult: Mapped[bool] = mapped_column(Boolean, default=False)
+    age_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+    state: Mapped[str] = mapped_column(String(10), default="waiting")  # waiting | queued | missed | failed | cancelled
+    job_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    message: Mapped[str] = mapped_column(String(200), default="")
+    next_check: Mapped[float] = mapped_column(Float, default=0.0)
+    created: Mapped[float] = mapped_column(Float, default=time.time)
+
+    def public(self) -> dict:
+        return {"id": self.id, "url": self.url, "start_at": self.start_at, "minutes": self.minutes, "preset": self.preset,
+                "state": self.state, "message": self.message, "job_id": self.job_id, "created": self.created}
 
 
 class ApiKey(Base):
@@ -218,13 +270,30 @@ class Database:
     async def link_oauth(self, user_id: str, provider: str, sub: str) -> None:
         async with self.session() as s:
             user = await s.get(User, user_id)
-            user.oauth_provider, user.oauth_sub = provider, sub
+            user.oauth_provider, user.oauth_sub, user.email_verified = provider, sub, True
             await s.commit()
 
     async def bump_epoch(self, user_id: str) -> None:
         async with self.session() as s:
             await s.execute(update(User).where(User.id == user_id).values(session_epoch=User.session_epoch + 1))
             await s.commit()
+
+    async def mark_email_verified(self, user_id: str, email: str) -> bool:
+        """Verify only if the account still has the address the link was sent to (the address cannot change today,
+        but the check keeps a stale link from verifying a different one if it ever can)."""
+        async with self.session() as s:
+            res = await s.execute(update(User).where(User.id == user_id, User.email == email).values(email_verified=True))
+            await s.commit()
+            return bool(res.rowcount)
+
+    async def reset_password(self, user_id: str, old_hash: str | None, new_hash: str) -> bool:
+        """Set a new password only if the hash is still the one the reset link was issued against (single use), end every
+        session, and count the address as verified: the person just proved they can read its mail."""
+        async with self.session() as s, s.begin():
+            cond = [User.id == user_id] + ([User.password_hash == old_hash] if old_hash else [User.password_hash.is_(None)])
+            res = await s.execute(update(User).where(*cond).values(
+                password_hash=new_hash, email_verified=True, session_epoch=User.session_epoch + 1))
+            return bool(res.rowcount)
 
     async def take_over_for_oauth(self, user_id: str, provider: str, sub: str) -> None:
         """First verified provider login for an account that was created with a password.
@@ -235,7 +304,7 @@ class Database:
         """
         async with self.session() as s, s.begin():
             await s.execute(update(User).where(User.id == user_id).values(
-                oauth_provider=provider, oauth_sub=sub, password_hash=None, session_epoch=User.session_epoch + 1))
+                oauth_provider=provider, oauth_sub=sub, password_hash=None, email_verified=True, session_epoch=User.session_epoch + 1))
             await s.execute(delete(ApiKey).where(ApiKey.user_id == user_id))
             await s.execute(delete(UserCookie).where(UserCookie.user_id == user_id))
 
@@ -244,6 +313,7 @@ class Database:
             await s.execute(delete(HistoryEntry).where(HistoryEntry.user_id == user_id))
             await s.execute(delete(UserCookie).where(UserCookie.user_id == user_id))
             await s.execute(delete(ApiKey).where(ApiKey.user_id == user_id))
+            await s.execute(delete(Schedule).where(Schedule.user_id == user_id, Schedule.state == "waiting"))
             await s.execute(delete(User).where(User.id == user_id))
             await s.commit()
 
@@ -298,7 +368,7 @@ class Database:
         now = now or time.time()
         async with self.session() as s, s.begin():
             payment = await s.get(Payment, payment_id)
-            if payment is None or payment.status in ("paid", "held"):
+            if payment is None or payment.status in PAYMENT_SETTLED:
                 return "noop"
             was = payment.status
             user = (await s.execute(select(User).where(User.id == payment.user_id).with_for_update())).scalar_one_or_none()
@@ -316,10 +386,159 @@ class Database:
             user.tier, user.tier_expires = entitlement_after(user.tier, user.tier_expires, plan, now)
             return "granted"
 
+    # transition table for payments that were already paid: action -> (allowed current statuses, new status)
+    _REVERSALS = {
+        "refund": ({"paid", "held", "disputed"}, "refunded"),
+        "dispute": ({"paid"}, "disputed"),
+        "dispute_won": ({"disputed"}, "paid"),
+        "chargeback": ({"paid", "disputed"}, "chargedback"),
+    }
+
+    async def reverse_payment(self, payment_id: str, action: str, actor: str, note: str = "",
+                              now: float | None = None) -> dict:
+        """Refund, dispute, win a dispute, or lose one (chargeback). One transaction, compare-and-set on the status.
+
+        Entitlement follows the money, using the same arithmetic the grant used (see billing.catalog.entitlement_after):
+        - refund/chargeback of a payment that is currently granting time: the plan's days come off the expiry; if nothing
+          is left the account drops to free. A payment that was `held` or already `disputed` granted nothing (or its time
+          was already taken back), so no further change is made.
+        - dispute: the same days are taken back at once (a customer who may be taking the money back keeps no access).
+        - dispute won: the plan is granted again from now, exactly as a fresh payment would be (or held, if the user now
+          has a higher plan).
+        - the user already has a *higher* plan than this payment bought: their access is left alone and the result says
+          so ("skipped_higher_plan"), because the higher plan's days cannot be attributed to this payment.
+        Repeating an action that has already happened is a no-op, so retried webhooks and double clicks are harmless.
+
+        Returns {"ok", "status", "changed", "entitlement", "error"?}.
+        """
+        from .billing.catalog import PLANS, TIER_RANK, entitlement_after
+
+        allowed, target = self._REVERSALS[action]
+        now = now or time.time()
+        async with self.session() as s, s.begin():
+            # Lock the payment row first. Under PostgreSQL's default isolation, two callers could otherwise both read "paid", both
+            # wait for the user's row, and both take the plan's days back (the loser's compare-and-set below only fails AFTER it
+            # has already changed the user, and returning normally commits that). SQLite serialises writers, which hid this.
+            payment = (await s.execute(select(Payment).where(Payment.id == payment_id).with_for_update())).scalar_one_or_none()
+            if payment is None:
+                return {"ok": False, "status": None, "changed": False, "entitlement": "none", "error": "Payment not found"}
+            if payment.status == target:
+                return {"ok": True, "status": target, "changed": False, "entitlement": "none"}
+            if payment.status not in allowed:
+                return {"ok": False, "status": payment.status, "changed": False, "entitlement": "none",
+                        "error": f"A {payment.status} payment cannot be {action.replace('_', ' ')}d"}
+            was = payment.status
+            user = (await s.execute(select(User).where(User.id == payment.user_id).with_for_update())).scalar_one_or_none()
+            plan = PLANS[payment.plan]
+            active = (user is not None and user.tier not in ("free", "anonymous")
+                      and (user.tier_expires is None or user.tier_expires > now))
+            entitlement = "none"
+            if action == "dispute_won":
+                if user is None or (active and TIER_RANK[user.tier] > TIER_RANK[plan.tier]):
+                    target, entitlement = "held", "held"  # nothing to give it to, or it would undercut a higher plan
+                else:
+                    user.tier, user.tier_expires = entitlement_after(user.tier, user.tier_expires, plan, now)
+                    entitlement = "granted"
+            elif was == "paid" and user is not None:
+                if TIER_RANK.get(user.tier, 0) > TIER_RANK[plan.tier] and active:
+                    entitlement = "skipped_higher_plan"
+                elif user.tier == plan.tier and user.tier_expires is not None:
+                    left = user.tier_expires - plan.days * 86400
+                    if left > now:
+                        user.tier_expires, entitlement = left, "shortened"
+                    else:
+                        user.tier, user.tier_expires, entitlement = "free", None, "revoked"
+                else:
+                    entitlement = "unchanged"  # a lapsed or manually granted plan has no days of this payment left to take
+            res = await s.execute(update(Payment).where(Payment.id == payment_id, Payment.status == was).values(status=target))
+            if res.rowcount != 1:
+                return {"ok": False, "status": None, "changed": False, "entitlement": "none", "error": "Changed by someone else; retry"}
+            s.add(PaymentEvent(payment_id=payment_id, at=now, kind=action, actor=actor[:64], from_status=was, to_status=target,
+                               entitlement=entitlement, note=note[:300]))
+            return {"ok": True, "status": target, "changed": True, "entitlement": entitlement}
+
+    async def record_payment_event(self, payment_id: str, kind: str, actor: str, note: str = "") -> None:
+        """An audit entry for something that changed no state (e.g. the provider says a dispute was resolved)."""
+        async with self.session() as s:
+            payment = await s.get(Payment, payment_id)
+            status = payment.status if payment else "?"
+            s.add(PaymentEvent(payment_id=payment_id, kind=kind, actor=actor[:64], from_status=status, to_status=status, note=note[:300]))
+            await s.commit()
+
+    async def payment_events(self, payment_id: str) -> list[dict]:
+        async with self.session() as s:
+            q = select(PaymentEvent).where(PaymentEvent.payment_id == payment_id).order_by(PaymentEvent.id)
+            return [e.public() for e in (await s.execute(q)).scalars()]
+
+    async def payments_needing_attention(self, statuses=("held", "disputed"), limit: int = 100) -> list[dict]:
+        async with self.session() as s:
+            q = (select(Payment, User.email).join(User, User.id == Payment.user_id, isouter=True)
+                 .where(Payment.status.in_(statuses)).order_by(Payment.created.desc()).limit(limit))
+            return [{**p.public(), "user_id": p.user_id, "email": email} for p, email in (await s.execute(q)).all()]
+
     async def set_tier(self, user_id: str, tier: str, expires: float | None = None) -> None:
         async with self.session() as s:
             user = await s.get(User, user_id)
             user.tier, user.tier_expires = tier, expires
+            await s.commit()
+
+    # --- scheduled recordings
+    async def add_schedule(self, per_user_cap: int, total_cap: int, **kwargs) -> "Schedule | str":
+        """Insert a waiting schedule, or return the reason it was refused ("user_cap" / "total_cap")."""
+        async with self.session() as s, s.begin():
+            waiting = Schedule.state == "waiting"
+            mine = (await s.execute(select(func.count()).select_from(Schedule)
+                                    .where(waiting, Schedule.user_id == kwargs["user_id"]))).scalar_one()
+            if mine >= per_user_cap:
+                return "user_cap"
+            if (await s.execute(select(func.count()).select_from(Schedule).where(waiting))).scalar_one() >= total_cap:
+                return "total_cap"
+            row = Schedule(**kwargs)
+            s.add(row)
+        return row
+
+    async def get_schedule(self, schedule_id: str) -> "Schedule | None":
+        async with self.session() as s:
+            return await s.get(Schedule, schedule_id)
+
+    async def list_schedules(self, user_id: str, limit: int = 50) -> list["Schedule"]:
+        async with self.session() as s:
+            q = select(Schedule).where(Schedule.user_id == user_id).order_by(Schedule.start_at.desc()).limit(limit)
+            return list((await s.execute(q)).scalars())
+
+    async def cancel_schedule(self, user_id: str, schedule_id: str) -> str | None:
+        """waiting -> cancelled; a finished row is removed; a released one (its recording may be running) is refused."""
+        async with self.session() as s, s.begin():
+            row = await s.get(Schedule, schedule_id)
+            if row is None or row.user_id != user_id:
+                return None
+            if row.state == "waiting":
+                res = await s.execute(update(Schedule).where(Schedule.id == schedule_id, Schedule.state == "waiting")
+                                      .values(state="cancelled", message="Cancelled"))
+                return "cancelled" if res.rowcount == 1 else "busy"
+            if row.state == "queued":
+                return "busy"
+            await s.delete(row)
+            return "deleted"
+
+    async def due_schedules(self, now: float, limit: int = 100) -> list["Schedule"]:
+        async with self.session() as s:
+            q = (select(Schedule).where(Schedule.state == "waiting", Schedule.start_at <= now, Schedule.next_check <= now)
+                 .order_by(Schedule.next_check, Schedule.start_at).limit(limit))  # never-checked first: no starvation
+            return list((await s.execute(q)).scalars())
+
+    async def settle_schedule(self, schedule_id: str, state: str, message: str = "", job_id: str | None = None) -> bool:
+        """waiting -> queued/missed/failed. Compare-and-set, so a cancel or another worker's release wins cleanly."""
+        async with self.session() as s:
+            res = await s.execute(update(Schedule).where(Schedule.id == schedule_id, Schedule.state == "waiting")
+                                  .values(state=state, message=message[:200], job_id=job_id))
+            await s.commit()
+            return res.rowcount == 1
+
+    async def defer_schedule(self, schedule_id: str, next_check: float) -> None:
+        async with self.session() as s:
+            await s.execute(update(Schedule).where(Schedule.id == schedule_id, Schedule.state == "waiting")
+                            .values(next_check=next_check))
             await s.commit()
 
     # --- saved cookies
@@ -394,14 +613,16 @@ class Database:
             return report.public()
 
     async def counts(self) -> dict:
-        from sqlalchemy import func
 
         async with self.session() as s:
             users = (await s.execute(select(func.count()).select_from(User))).scalar_one()
             paid = (await s.execute(select(func.count()).select_from(Payment).where(Payment.status == "paid"))).scalar_one()
             open_reports = (await s.execute(select(func.count()).select_from(Report).where(Report.status == "open"))).scalar_one()
             held = (await s.execute(select(func.count()).select_from(Payment).where(Payment.status == "held"))).scalar_one()
-            return {"users": users, "paid_payments": paid, "open_reports": open_reports, "held_payments": held}
+            disputed = (await s.execute(select(func.count()).select_from(Payment).where(Payment.status == "disputed"))).scalar_one()
+            scheduled = (await s.execute(select(func.count()).select_from(Schedule).where(Schedule.state == "waiting"))).scalar_one()
+            return {"users": users, "paid_payments": paid, "open_reports": open_reports, "held_payments": held,
+                    "disputed_payments": disputed, "scheduled_waiting": scheduled}
 
     # --- API keys
     async def create_key(self, user_id: str, name: str, key_hash: str, webhook_secret: str, key_id: str) -> ApiKey:

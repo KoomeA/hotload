@@ -25,6 +25,7 @@ class Tier:
     priority: bool = False  # served by the priority worker pool
     live_minutes: int = 0  # longest live recording allowed (0 = not on this plan)
     max_filesize_mb: int = 500  # largest single file; also bounds what FFmpeg may write for this job
+    scheduled_max: int = 0  # recordings that may be waiting to start at once (0 = not on this plan)
 
 
 TIERS: dict[str, Tier] = {
@@ -32,8 +33,8 @@ TIERS: dict[str, Tier] = {
     for t in (
         Tier("anonymous", 10, 20 * 60, 3, False, 1),
         Tier("free", 10, 20 * 60, 5, False, 1),
-        Tier("premium", 100, 180 * 60, 10, True, 3, True, 30, 2000),
-        Tier("pro", 300, 360 * 60, 20, True, 3, True, 60, 4000),
+        Tier("premium", 100, 180 * 60, 10, True, 3, True, 30, 2000, 3),
+        Tier("pro", 300, 360 * 60, 20, True, 3, True, 60, 4000, 10),
     )
 }
 

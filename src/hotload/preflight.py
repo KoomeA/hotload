@@ -17,6 +17,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 
+from . import notify
 from .config import Settings, get_settings
 
 FAIL, WARN, OK, INFO = "FAIL", "WARN", "OK", "INFO"
@@ -116,17 +117,48 @@ def check(s: Settings, which: Callable[[str], str | None] = shutil.which) -> lis
         if cur.upper() not in ("USD", "KES", "NGN", "GHS", "ZAR"):
             add(INFO, "payments", f"prices set for {cur.upper()}: Paystack will not offer it (subunit handling unconfirmed); BTCPay will.")
 
+    # --- scheduled recording
+    if s.scheduled_enabled and s.max_scheduled_running >= 4:
+        add(WARN, "scheduling", f"HOTLOAD_MAX_SCHEDULED_RUNNING={s.max_scheduled_running}: each worker runs 4 jobs, so this many "
+            "scheduled recordings can take every slot of a small deployment. Keep it below workers x 4.")
+    if s.scheduled_enabled and hosted and not s.egress_filtered:
+        add(INFO, "scheduling", "scheduled recordings are refused until HOTLOAD_EGRESS_FILTERED is on (they use live recording).")
+    if s.scheduled_enabled and not s.mail_enabled:
+        add(INFO, "scheduling", "no mail provider: owners are not emailed when a scheduled recording finishes or is missed (they can still see it in the account page).")
+
+    # --- email
+    if s.smtp_host and not s.mail_enabled:
+        add(WARN, "email", "SMTP is half configured: HOTLOAD_SMTP_HOST, HOTLOAD_MAIL_FROM and an https HOTLOAD_PUBLIC_URL are all required; mail stays off.")
+    elif s.mail_enabled:
+        add(OK, "email", "email verification and password reset are on.")
+        if s.smtp_security == "none" and s.smtp_host not in ("localhost", "127.0.0.1", "::1"):
+            add(FAIL if hosted else WARN, "email", "SMTP without TLS to a remote host: tokens and passwords-reset links would cross the network in clear text.")
+        if s.smtp_user and not s.smtp_password:
+            add(WARN, "email", "HOTLOAD_SMTP_USER is set without HOTLOAD_SMTP_PASSWORD.")
+        if hosted and not s.require_verified_email:
+            add(INFO, "email", "HOTLOAD_REQUIRE_VERIFIED_EMAIL is off: unverified accounts can still buy plans and create API keys.")
+    elif hosted:
+        add(WARN, "email", "no mail provider: password reset is unavailable and addresses cannot be verified (docs/ACCOUNTS.md).")
+    if s.require_verified_email and not s.mail_enabled:
+        add(FAIL, "email", "HOTLOAD_REQUIRE_VERIFIED_EMAIL is on but mail is not configured: nobody could ever verify, so nobody could buy.")
+
     # --- optional features
     if s.cookie_key:
         add(WARN, "cookies-vault", "saved cookies are on: keep HOTLOAD_COOKIE_KEY in a secret manager, apart from database backups (docs/COOKIES.md).")
     if s.telegram_bot_token and not (s.telegram_webhook_secret and https):
         add(FAIL, "bot", "Telegram bot needs HOTLOAD_TELEGRAM_WEBHOOK_SECRET and an https HOTLOAD_PUBLIC_URL.")
+    if (s.discord_public_key or s.discord_application_id) and not notify.discord_enabled(s):
+        add(WARN, "bot", "Discord is half configured: HOTLOAD_DISCORD_PUBLIC_KEY, HOTLOAD_DISCORD_APPLICATION_ID and HOTLOAD_PUBLIC_URL are all required; the bot stays off.")
+    elif notify.discord_enabled(s):
+        if not https:
+            add(FAIL, "bot", "Discord only calls https:// interaction endpoints: set an https HOTLOAD_PUBLIC_URL.")
+        add(INFO, "bot", "Discord bot is on: set the Interactions Endpoint URL to <PUBLIC_URL>/api/v1/bots/discord and run `python -m hotload.admin discord-commands`.")
     if s.github_client_id or s.google_client_id:
         add(INFO, "oauth", "OAuth is on: register callbacks at <PUBLIC_URL>/api/v1/auth/oauth/<provider>/callback and test live.")
 
     # --- known gaps that are not configuration (so the checklist is honest)
-    if hosted and s.registration_open:
-        add(WARN, "accounts", "registration is open and email is not verified (no mail provider yet): free accounts can be farmed, passwords cannot be reset.")
+    if hosted and s.registration_open and not s.require_verified_email:
+        add(WARN, "accounts", "registration is open and email verification is not enforced: free accounts can be farmed.")
     return f
 
 

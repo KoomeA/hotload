@@ -12,7 +12,7 @@ contradicted things I had told you earlier. They are listed here so nobody relie
 | Finding | Severity | Status |
 |---|---|---|
 | **SSRF guard did not cover redirects/DNS rebinding** (my M1 claim was wrong; reproduced: an internal server was reached) | High | Fixed: connect-time guard, every FFmpeg URL validated, FFmpeg protocol whitelist; FFmpeg features need the egress filter |
-| Hardened overlay did not protect the API container; FFmpeg ignores upper-case proxy vars | High | Fixed (overlay rewritten); **untested: no container runtime here** |
+| Hardened overlay did not protect the API container; FFmpeg ignores upper-case proxy vars | High | Fixed (overlay rewritten); egress proxy now run for real (see 2a); the full stack still not brought up |
 | Cheaper plan could extend a higher plan (~395 Pro days for ~$114) | High | Fixed: such payments are held for review |
 | Pre-hijack: unverified registration + OAuth link kept the attacker's password | High | Fixed: takeover on first verified login (password, sessions, keys, cookies cut off) |
 | Metadata fetch could pin threads/memory (endless or dripping page) | High | Fixed: deadline + byte cap, bounded pool, 503 when busy |
@@ -23,13 +23,36 @@ contradicted things I had told you earlier. They are listed here so nobody relie
 | Sessions not revocable; login limits too coarse; tokens in URLs/logs; job status leaked tokens | Med | Fixed (session epoch, 3-layer limits, redaction, owner-only status) |
 | Thumbnails disclosed the visitor's IP to arbitrary hosts | Med | Fixed: signed same-origin proxy, CSP `img-src 'self'` |
 | Service worker never served the offline shell | Low | Fixed (verified offline in a browser) |
-| Registered emails can be enumerated (409 on register) | Low | **Open, accepted** until email verification exists |
+| Registered emails can be enumerated (409 on register) | Low | **Open, accepted**: sign-up says the address is taken. Password reset does not leak it. |
 | Bookmarklet sends the full page URL (incl. query) to your server | Low | Open: user-initiated, documented |
 | `?url=` links auto-fetch (forced server-side fetch on the visitor's quota) | Low | Open, accepted (needed for share target / extension) |
 
 Also found by testing, not by the reviewers: the `no_proxy` list was being treated as a proxy list (exempting loopback), a
 hostname-only proxy exemption exposed every port on a loopback proxy, a test that "proved" bot tokens stay out of logs was
 capturing nothing, and the pinned-IP technique fails behind proxies that refuse CONNECT to a bare IP.
+
+## 2a. What running the checklist found (2026-10-31)
+A PostgreSQL 16 server and a Docker daemon turned out to be available, so part of the infrastructure checklist could be run for real.
+Running it found four bugs that reading the code, and a SQLite-only test suite, had not:
+
+| Found by running | Impact | Status |
+|---|---|---|
+| `squid.conf` used `access_log stdio:/dev/stdout`; squid runs as an unprivileged user and cannot open it: **squid crashed at startup** | The hardened stack could not start (api and workers depend on it) | Fixed: logs to the file the image forwards to `docker logs` |
+| Squid ignores its IPv6 deny list when IPv6 is disabled, so a NAT64 / 6to4 literal (e.g. `[64:ff9b::a00:1]`, which is 10.0.0.1) was **not refused by policy** | Egress filter gap for IPv6-literal targets | Fixed: IPv6 literals are refused outright (`acl ipv6_literal`) |
+| **Concurrent first-run migrations collided** on PostgreSQL: with 3 processes starting together, 2 crashed with a duplicate-key error (the checklist already warned of it) | A first deploy of api + worker + worker-priority could fail to come up | Fixed: a PostgreSQL advisory lock in `migrations/env.py`; 3 rounds of 4 simultaneous starts all succeed |
+
+| **Concurrent refunds of one payment could take the plan's days back more than once on PostgreSQL**: `reverse_payment` changed the user before its compare-and-set on the payment, and a losing caller's change was committed anyway. SQLite serialises writers, so every SQLite test passed | High (customers losing paid days) | Fixed: the payment row is locked first. Found only by running the suite on PostgreSQL; the test fails without the fix |
+
+Run and passing: migrations from empty and from an older revision with data (PostgreSQL 16); the **whole test suite on PostgreSQL**
+(`tests/postgres_plugin.py`, usage in its docstring; `tests/test_postgres.py` holds the checks that only mean something there); `pg_dump` / `pg_restore` into a new database with the app starting cleanly on the copy (users,
+password hashes, payments and their audit trail, schedules, cookies intact); the preflight on the documented hosted configuration
+(0 failures) and on the review's mistakes (each a failure); the egress filter's deny rules (`deploy/egress/check.sh`, on an
+internal Docker network with no route out, with a negative control that fails without the fix).
+
+**Not run, and why:** the app image build and the full hardened stack (building needs outbound network access that this session's
+policy does not give containers, and Caddy needs a real domain); the egress filter's *allow* side from a real worker (a public
+address is only shown to be "not refused by policy", not reached); a trim job whose media URL redirects to an internal address
+(needs the full stack); managed PostgreSQL / Redis, S3 and every real third-party service; load testing.
 
 ## 2. Gates: do not launch publicly until these are true
 Things that **only you / a staging environment can verify**. I could not do them here.
@@ -41,21 +64,22 @@ Things that **only you / a staging environment can verify**. I could not do them
 - [ ] Tax treatment (VAT/digital services) decided; business bank account and payout flow in place.
 
 **Infrastructure (staging first)**
-- [ ] **Build the images and bring up the hardened overlay** (`docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.hardened.yml --profile hosted up`). It has never been run.
-- [ ] **Prove the egress filter works** from inside a worker container: `curl -m 5 http://169.254.169.254/` and `curl -m 5 http://10.0.0.1/` must fail; `curl -m 5 https://example.com/` must work. Then submit a trim job whose media URL redirects to an internal address and confirm it fails. Only then set `HOTLOAD_EGRESS_FILTERED=true`.
-- [ ] PostgreSQL (not SQLite), managed Redis, S3/R2 bucket (private), TLS via the edge proxy, backups of the database **and a restore drill**.
-- [ ] Pin the squid and Caddy images to tested tags/digests; add memory/disk alerts; put `/data` (or the scratch volume) on a size-limited volume.
-- [ ] Migrations: run `alembic upgrade head` once before starting several replicas (two simultaneous first runs can collide).
+- [ ] **Build the images and bring up the hardened overlay** (the egress proxy alone has been run; the rest has not) (`docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.hardened.yml --profile hosted up`). It has never been run.
+- [ ] **Prove the egress filter works** from inside a worker container (the deny rules are proven by `deploy/egress/check.sh`; what remains is the allow side and the redirect job): `curl -m 5 http://169.254.169.254/` and `curl -m 5 http://10.0.0.1/` must fail; `curl -m 5 https://example.com/` must work. Then submit a trim job whose media URL redirects to an internal address and confirm it fails. Only then set `HOTLOAD_EGRESS_FILTERED=true`.
+- [ ] Managed PostgreSQL (the suite, migrations and a dump/restore drill pass on PostgreSQL 16), managed Redis, S3/R2 bucket (private), TLS via the edge proxy, and *your* backup system with *its* restore drill (the application side of one has been proven).
+- [ ] Pin the Caddy image (squid is pinned to the tested digest); add memory/disk alerts; put `/data` (or the scratch volume) on a size-limited volume.
+- [x] Migrations are safe to start from several processes at once (advisory lock; tested). Running `alembic upgrade head` once first is still tidy but no longer required.
 
 **Integrations with real services**
 - [ ] Paystack **test mode** end to end (checkout, webhook, verify, return page). API details were cross-checked from third-party guides only.
 - [ ] BTCPay staging store: invoice, testnet payment, `InvoiceSettled` grants the plan; a late/underpaid/expired invoice behaves as documented.
-- [ ] OAuth (GitHub/Google) live; Telegram webhook registered and a test chat; S3/R2 upload, signed URL, ZIP stream, cleanup.
+- [ ] OAuth (GitHub/Google) live; Telegram webhook registered and a test chat; Discord endpoint saved in the portal, commands registered and each run once; S3/R2 upload, signed URL, ZIP stream, cleanup.
+- [ ] Schedule a real recording of a real channel that goes live (docs/SCHEDULING.md) and set `HOTLOAD_MAX_SCHEDULED_RUNNING` below your worker slots.
 - [ ] Confirm YouTube and the other top sites work from your production egress IPs (datacentre IPs get blocked); budget proxies.
 
 **Product gaps to decide on**
-- [ ] **Email verification and password reset** (needs a mail provider). Until then: open registration is farmable and lost passwords are unrecoverable.
-- [ ] Refund/chargeback handling is manual (held payments, provider dashboards). Decide who does it and how fast.
+- [ ] **Email**: set the `HOTLOAD_SMTP_*` variables and `HOTLOAD_MAIL_FROM` (code is built and tested against a local sink; docs/ACCOUNTS.md), send a real test message, set SPF/DKIM/DMARC, then consider `HOTLOAD_REQUIRE_VERIFIED_EMAIL=true`.
+- [ ] Refunds and chargebacks are built (docs/PAYMENTS.md section 5) but need an owner: who watches `payment DISPUTED` / `dispute RESOLVED` alerts and the console's decision list, and within what time. Confirm Paystack's refund/dispute events in test mode.
 - [ ] Native-speaker review of the es/fr/de/pt/sw translations.
 
 ## 3. Hosted configuration (minimum)
@@ -70,6 +94,7 @@ HOTLOAD_TRUST_PROXY_HEADERS=true  HOTLOAD_TRUSTED_PROXY_HOPS=1   # = proxies in 
 HOTLOAD_METRICS_TOKEN=<random>
 HOTLOAD_EGRESS_FILTERED=true                       # only after the filter is proven (section 2)
 HOTLOAD_COOKIE_KEY=<python -m hotload.admin cookie-key>   # only if you offer saved cookies
+HOTLOAD_SMTP_HOST=smtp.example  HOTLOAD_SMTP_USER=...  HOTLOAD_SMTP_PASSWORD=...  HOTLOAD_MAIL_FROM='Hotload <no-reply@your.domain>'
 ```
 Then: `python -m hotload.preflight` must report **0 failures**, and every warning should be one you have chosen to accept.
 

@@ -1,6 +1,8 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,6 +14,14 @@ class Settings(BaseSettings):
     public_url: str | None = None  # e.g. https://hotload.example (OAuth callbacks, same-origin check)
     cookie_secure: bool | None = None  # None = secure whenever public_url is https (recommended); set explicitly to override
     registration_open: bool = True
+    # --- email (verification and password reset). Off until smtp_host, mail_from and public_url are all set. ---
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    smtp_security: Literal["starttls", "ssl", "none"] = "starttls"  # ssl = implicit TLS (port 465); none only for a local relay
+    mail_from: str | None = None  # e.g. "Hotload <no-reply@hotload.example>"
+    require_verified_email: bool = False  # hosted: unverified password accounts cannot buy plans or create API keys
     quotas_enabled: bool = False  # self-host default: unlimited. The hosted service turns this on.
     allowed_origins: list[str] = []  # extra Origins allowed to make state-changing requests (e.g. extensions)
     github_client_id: str | None = None
@@ -44,11 +54,26 @@ class Settings(BaseSettings):
     # Generate one with: python -m hotload.admin cookie-key
     cookie_key: str | None = None
     max_live_minutes: int = 60  # longest live recording a job may request (a worker slot is held that long)
+    # --- scheduled recording: a schedule waits in the database (no worker is held) and is released when the stream is live ---
+    scheduled_enabled: bool = True
+    max_scheduled_per_user: int = 10  # waiting schedules per account when plans are not enforced (plans set their own)
+    max_scheduled_total: int = 500  # waiting schedules on the whole server
+    schedule_horizon_days: int = 14  # furthest ahead a recording may be scheduled
+    schedule_grace_minutes: int = 30  # how long past the planned start to keep waiting for a stream that has not begun
+    max_scheduled_running: int = 2  # scheduled recordings that may run at once (keep it below your total worker slots: 4 per worker)
+    schedule_probes_per_tick: int = 10  # liveness checks per 30 s tick, so many schedules cannot hammer the sites
+    scheduled_keep_hours: int = 24  # how long a finished scheduled recording stays downloadable (normal files: file_ttl_seconds)
     # --- Telegram bot (needs public_url too: replies carry download links) ---
     telegram_bot_token: str | None = None
     telegram_webhook_secret: str | None = None  # Telegram echoes it in X-Telegram-Bot-Api-Secret-Token
     telegram_allowed_chats: list[int] = []  # empty = anyone may use the bot
     telegram_api_base: str = "https://api.telegram.org"
+    # --- Discord bot (slash commands over the interactions webhook; needs public_url too) ---
+    discord_public_key: str | None = None  # the application's public key (hex), from the developer portal: verifies every request
+    discord_application_id: str | None = None
+    discord_bot_token: str | None = None  # only used by `python -m hotload.admin discord-commands`, never by the running API
+    discord_allowed_users: list[int] = []  # empty = anyone who can run the commands
+    discord_api_base: str = "https://discord.com/api/v10"
     redis_url: str = "redis://localhost:6379/0"
     data_dir: Path = Path("data")
     file_ttl_seconds: int = 3600
@@ -82,6 +107,31 @@ class Settings(BaseSettings):
     trust_proxy_headers: bool = False  # honour X-Forwarded-For (set behind a reverse proxy)
     trusted_proxy_hops: int = 1  # reverse proxies in front of the app; the client IP is the Nth entry from the RIGHT
     ffmpeg_location: str | None = None
+
+    @field_validator("discord_public_key")
+    @classmethod
+    def _discord_key_is_hex(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        try:
+            ok = len(bytes.fromhex(v.strip())) == 32
+        except ValueError:
+            ok = False
+        if not ok:
+            raise ValueError("HOTLOAD_DISCORD_PUBLIC_KEY must be the 64 hex characters shown under General Information in the Discord developer portal")
+        return v.strip().lower()
+
+    @field_validator("discord_application_id")
+    @classmethod
+    def _discord_app_id_is_digits(cls, v: str | None) -> str | None:
+        if v and not v.strip().isdigit():
+            raise ValueError("HOTLOAD_DISCORD_APPLICATION_ID must be the numeric application id")
+        return v.strip() if v else None
+
+    @property
+    def mail_enabled(self) -> bool:
+        # Links in mail are built from public_url, never from the request's Host header (which an attacker controls).
+        return bool(self.smtp_host and self.mail_from and self.public_url)
 
     @property
     def secure_cookies(self) -> bool:

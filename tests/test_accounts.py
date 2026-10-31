@@ -185,7 +185,7 @@ def oc(make_client):
 
 
 def test_providers_and_unconfigured_oauth(c, oc):
-    assert c.get("/api/v1/auth/providers").json() == {"password": True, "oauth": []}
+    assert c.get("/api/v1/auth/providers").json() == {"password": True, "oauth": [], "email": False}
     assert oc.get("/api/v1/auth/providers").json()["oauth"] == ["github"]
     assert c.get("/api/v1/auth/oauth/github/login", follow_redirects=False).status_code == 404
     assert oc.get("/api/v1/auth/oauth/google/login", follow_redirects=False).status_code == 404

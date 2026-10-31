@@ -39,9 +39,27 @@ def set_telegram_webhook() -> int:
     return 0 if r.status_code == 200 else 1
 
 
+def register_discord_commands() -> int:
+    """Publishes the slash commands (replaces the application's global command list). Needs the bot token once."""
+    import httpx
+
+    from . import notify
+    from .api.discord import COMMANDS
+
+    s = get_settings()
+    if not notify.discord_enabled(s) or not s.discord_bot_token:
+        print("Set HOTLOAD_DISCORD_PUBLIC_KEY, HOTLOAD_DISCORD_APPLICATION_ID, HOTLOAD_DISCORD_BOT_TOKEN and HOTLOAD_PUBLIC_URL first.")
+        return 1
+    r = httpx.put(f"{s.discord_api_base.rstrip('/')}/applications/{s.discord_application_id}/commands", json=COMMANDS,
+                  headers={"Authorization": f"Bot {s.discord_bot_token}"}, timeout=20)
+    print(f"registered {len(COMMANDS)} commands (global commands can take a while to appear)" if r.status_code == 200
+          else f"Discord said: {r.status_code} {r.text[:200]}")
+    return 0 if r.status_code == 200 else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Hotload admin commands")
-    ap.add_argument("action", choices=["grant", "revoke", "cookie-key", "telegram-webhook"])
+    ap.add_argument("action", choices=["grant", "revoke", "cookie-key", "telegram-webhook", "discord-commands"])
     ap.add_argument("email", nargs="?")
     args = ap.parse_args(argv)
     if args.action == "cookie-key":  # prints a fresh key for HOTLOAD_COOKIE_KEY; store it in your secret manager
@@ -51,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.action == "telegram-webhook":  # registers <PUBLIC_URL>/api/v1/bots/telegram with Telegram
         return set_telegram_webhook()
+    if args.action == "discord-commands":
+        return register_discord_commands()
     if not args.email:
         ap.error("an email is required for grant/revoke")
     return asyncio.run(run(args.action, args.email))

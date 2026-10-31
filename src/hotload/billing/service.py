@@ -4,7 +4,7 @@ import time
 import httpx
 
 from ..config import Settings
-from ..db import Database, Payment
+from ..db import PAYMENT_SETTLED, Database, Payment
 from ..logging_setup import log
 from .base import Provider, ProviderError, Verified
 from .btcpay import BTCPay
@@ -67,7 +67,7 @@ class BillingService:
 
     async def apply(self, payment: Payment, verified: Verified) -> Payment:
         """Act on the provider's verified answer. Idempotent."""
-        if payment.status in ("paid", "held"):
+        if payment.status in PAYMENT_SETTLED:
             return payment
         if verified.status == "paid":
             if verified.amount_minor < payment.amount_minor or verified.currency != payment.currency:
@@ -91,12 +91,30 @@ class BillingService:
             await self.db.close_payment(payment.id, "expired")
         return await self.db.get_payment(payment.id)
 
+    async def _reversal_event(self, provider: str, kind: str, payment_id: str) -> str:
+        """A signed provider notice about a refund or dispute. The signature proves who sent it. The automatic effects are
+        the safe ones: a refund the provider already made is recorded, and a new dispute suspends the plan. How a dispute
+        ended is NOT acted on automatically (outcome wording differs between processors): it is logged for a human."""
+        payment = await self.db.get_payment(payment_id)
+        if payment is None or payment.provider != provider:
+            return "ignored"
+        actor = f"provider:{provider}"
+        if kind == "refund":
+            await self.reverse(payment.id, "refund", actor, "reported by the provider")
+        elif kind == "dispute_opened":
+            await self.reverse(payment.id, "dispute", actor, "opened by the customer's bank")
+        else:
+            await self.db.record_payment_event(payment.id, "dispute_resolved", actor, "provider reports a resolution")
+            log(logger, "dispute RESOLVED by provider: check the outcome and confirm it (win or chargeback) in the admin console",
+                logging.ERROR, payment=payment.id, provider=provider)
+        return "ok"
+
     async def refresh(self, payment: Payment) -> Payment:
         """Ask the provider about an unsettled payment (used by the return page, so slow webhooks do not matter).
 
         Closed (expired/failed) payments are re-checked too: a customer can still pay a BTCPay invoice late or finish a
         Paystack checkout after our 24 h window, and that money must not vanish."""
-        if payment.status in ("paid", "held"):
+        if payment.status in PAYMENT_SETTLED:
             return payment
         prov = self.providers.get(payment.provider)
         if prov is None:
@@ -107,11 +125,46 @@ class BillingService:
             log(logger, "verify failed", logging.WARNING, payment=payment.id, error=str(exc))
             return payment
 
+    async def reverse(self, payment_id: str, action: str, actor: str, note: str = "") -> dict:
+        """Refund / dispute / dispute won / chargeback bookkeeping (Database.reverse_payment), with the alerts."""
+        result = await self.db.reverse_payment(payment_id, action, actor, note)
+        if result["changed"]:
+            level = logging.INFO if action in ("refund", "dispute_won") else logging.ERROR
+            log(logger, f"payment {action.upper().replace('_', ' ')}", level, payment=payment_id, actor=actor,
+                status=result["status"], entitlement=result["entitlement"])
+        return result
+
+    async def refund(self, payment: Payment, actor: str, note: str, through_provider: bool) -> dict:
+        """Refund a payment. With `through_provider` the provider moves the money first; without it the operator is
+        recording a refund they already made elsewhere (BTCPay, a processor dashboard, a bank transfer)."""
+        if payment.status not in ("paid", "held", "disputed"):
+            if payment.status == "refunded":
+                return await self.reverse(payment.id, "refund", actor, note)  # idempotent answer
+            raise CheckoutRefused(f"A {payment.status} payment cannot be refunded", 409)
+        ref = ""
+        if through_provider:
+            prov = self.providers.get(payment.provider)
+            if prov is None:
+                raise CheckoutRefused(f"{payment.provider} is not configured on this server, so it cannot be asked to refund. "
+                                      "Refund where you hold the money, then record it here without the provider option", 400)
+            if not hasattr(prov, "refund"):
+                raise CheckoutRefused(f"{payment.provider} cannot refund through its API: refund in its dashboard, then "
+                                      "record it here without the provider option", 400)
+            try:
+                ref = await prov.refund(payment)
+            except ProviderError as exc:
+                log(logger, "provider refund failed", logging.WARNING, payment=payment.id, error=str(exc))
+                raise CheckoutRefused(f"The provider refused the refund: {exc}", 502) from exc
+        return await self.reverse(payment.id, "refund", actor, f"{note} [provider refund {ref}]" if ref else note)
+
     async def handle_webhook(self, provider: str, headers, body: bytes) -> str:
         """Returns 'bad-signature', 'ignored' or 'ok'. Signature first, then re-verification with the provider."""
         prov = self.providers.get(provider)
         if prov is None or not prov.check_signature(headers, body):
             return "bad-signature"
+        event = prov.reversal(body) if hasattr(prov, "reversal") else None
+        if event:
+            return await self._reversal_event(provider, *event)
         payment_id, ref = prov.reference(body)
         payment = None
         if payment_id:

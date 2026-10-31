@@ -78,11 +78,47 @@ None of the sources addressed adult-content policies: confirm each provider's ru
   `BTCPay-Sig: sha256=<HMAC-SHA256 of the body keyed with the webhook secret>`; the webhook payload carries the invoice
   id, so the invoice is fetched from BTCPay to learn its status, amount and our order id.
 
-## 5. Before taking real money
+## 5. Refunds, disputes and chargebacks
+
+Payments move through `pending -> paid`, and after that `paid -> refunded`, `paid -> disputed -> paid | chargedback`,
+`paid -> chargedback`, and `held -> refunded` (a held payment never granted anything). Every change is one database
+transaction with a compare-and-set on the status, so retried webhooks and double clicks change nothing twice, and each is
+written to an append-only audit trail (`payment_events`: who, what, when, note, and what happened to the plan).
+
+**Entitlement follows the money**, with the arithmetic the grant used: refunding or charging back a payment takes its days
+off the plan's expiry (two stacked purchases, one refunded: one purchase's days remain); nothing left means free. A dispute
+takes the days back immediately and winning it grants the plan again from that moment. Known edges, all deliberate:
+- The user has since moved to a *higher* plan: their access is left alone and the result says `skipped_higher_plan`
+  (the higher plan's days cannot be attributed to the cheaper payment). Decide by hand whether to adjust it.
+- A manual perpetual grant or an already lapsed plan has no days of this payment left to take.
+- A won dispute for a user who now has a higher plan, or no account, is `held` for an operator, not granted.
+- A refunded, disputed or charged-back payment is never granted again, even if the provider keeps saying "success".
+
+**Who does what**
+- Admin console `/admin/` -> "Payments needing a decision" lists `held` and `disputed` payments. Refund (optionally *through
+  Paystack*), "Dispute won: restore plan", "Dispute lost" (chargeback). API: `GET /api/v1/admin/payments`,
+  `GET .../payments/{id}` (with its audit trail), `POST .../payments/{id}/refund | dispute | dispute-won | chargeback`.
+- Provider webhooks (Paystack): a signed `refund.processed` is recorded as a refund; a signed `charge.dispute.create` suspends
+  the plan. A signed `charge.dispute.resolve` is only *logged at ERROR* and added to the audit trail: how a dispute ended is
+  not acted on automatically, because processors word outcomes differently. The overview counts `disputed_payments`.
+- BTCPay (crypto) has no chargebacks and no refund API here: refund on-chain or from the BTCPay dashboard, then record it in
+  the console without "through provider". Any other processor's dispute notice (email, dashboard) is recorded the same way.
+
+**Not verified against the live provider** (the same caveat as the rest of this file): Paystack's `POST /refund` request and
+the event names/field locations for `refund.processed`, `charge.dispute.create` and `charge.dispute.resolve` were written from
+memory of its documentation, which could not be fetched. The code treats an unrecognised event as ignored, so a wrong field name
+fails safe (nothing happens automatically; the console still works). Confirm in Paystack test mode, then correct
+`billing/paystack.py` if needed.
+
+**Not built:** partial refunds, automatic account suspension after repeated chargebacks (a person who charges back can open a
+new account: watch the `payment CHARGEBACK` ERROR logs), refund and receipt emails to the customer, and CCBill/Segpay-style
+processor modules (their webhook formats are not known here).
+
+## 6. Before taking real money
 
 - [ ] Written answers from Paystack (and any crypto gateway) about adult-site support and a download service.
 - [ ] Quotes from at least two adult-friendly card processors (rate, reserve %/duration, registration fee, exit hold).
-- [ ] Paystack test-mode run through `/api/v1/billing/checkout` and the webhook (mocked in tests, never run live here).
+- [ ] Paystack test-mode run through `/api/v1/billing/checkout` and the webhook (mocked in tests, never run live here), including a refund and a dispute event (section 5).
 - [ ] BTCPay staging run: create invoice, pay on testnet/regtest, confirm `InvoiceSettled` grants the plan.
 - [ ] Legal review of Terms, refund policy and the DMCA agent registration; tax treatment (VAT/digital services).
 - [ ] Rotate keys into a secret manager; set `HOTLOAD_SECRET_KEY`, HTTPS, and `HOTLOAD_PUBLIC_URL`.

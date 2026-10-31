@@ -19,18 +19,35 @@ class StorageError(Exception):
     pass
 
 
+KEEP_PREFIX = "keep/"
+
+
 def job_dir(output_dir: Path, job_id: str) -> Path:
     return output_dir / job_id
 
 
+KEEP_MARKER = ".keep_until"
+
+
+def mark_keep(output_dir: Path, job_id: str, until: float) -> None:
+    """Keep a job's directory until `until` instead of the usual TTL (scheduled recordings finish while nobody is watching)."""
+    (job_dir(output_dir, job_id) / KEEP_MARKER).write_text(str(until))
+
+
 def cleanup_expired(output_dir: Path, ttl_seconds: int, now: float | None = None) -> int:
-    """Delete local job directories older than the TTL. Returns the number removed."""
+    """Delete local job directories older than the TTL (or past their keep marker). Returns the number removed."""
     if not output_dir.exists():
         return 0
     now = now or time.time()
     removed = 0
     for child in output_dir.iterdir():
-        if child.is_dir() and now - child.stat().st_mtime > ttl_seconds:
+        if not child.is_dir():
+            continue
+        try:
+            expired = now > float((child / KEEP_MARKER).read_text())
+        except (OSError, ValueError):
+            expired = now - child.stat().st_mtime > ttl_seconds
+        if expired:
             shutil.rmtree(child, ignore_errors=True)
             removed += 1
     return removed
@@ -65,11 +82,12 @@ class S3Storage:
     def enabled(settings: Settings) -> bool:
         return settings.storage_backend == "s3" and bool(settings.s3_bucket)
 
-    def key_for(self, job_id: str, filename: str) -> str:
-        return f"{self.prefix}{job_id}/{_safe_name(filename)}"
+    def key_for(self, job_id: str, filename: str, retain: bool = False) -> str:
+        return f"{self.prefix}{KEEP_PREFIX if retain else ''}{job_id}/{_safe_name(filename)}"
 
-    def put(self, job_id: str, path: Path) -> str:
-        key = self.key_for(job_id, path.name)
+    def put(self, job_id: str, path: Path, retain: bool = False) -> str:
+        """`retain` files go under keep/ and are expired by the longer keep TTL (scheduled recordings)."""
+        key = self.key_for(job_id, path.name, retain)
         try:
             self.client.upload_file(str(path), self.bucket, key)
         except Exception as exc:  # noqa: BLE001 - botocore raises many types
@@ -97,12 +115,15 @@ class S3Storage:
         except Exception:  # noqa: BLE001
             return False
 
-    def cleanup_expired(self, ttl_seconds: int, now: float | None = None) -> int:
-        """Delete objects under the prefix older than the TTL. Returns the number removed."""
-        cutoff = (now or time.time()) - ttl_seconds
+    def cleanup_expired(self, ttl_seconds: int, now: float | None = None, keep_ttl_seconds: int | None = None) -> int:
+        """Delete objects under the prefix older than the TTL (keep/ objects: the keep TTL). Returns the number removed."""
+        now = now or time.time()
+        keep = f"{self.prefix}{KEEP_PREFIX}"
         removed = 0
         for page in self.client.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=self.prefix):
-            stale = [{"Key": o["Key"]} for o in page.get("Contents", []) if o["LastModified"].timestamp() < cutoff]
+            stale = [{"Key": o["Key"]} for o in page.get("Contents", [])
+                     if o["LastModified"].timestamp() < now - (keep_ttl_seconds if keep_ttl_seconds and o["Key"].startswith(keep)
+                                                               else ttl_seconds)]
             if stale:
                 self.client.delete_objects(Bucket=self.bucket, Delete={"Objects": stale, "Quiet": True})
                 removed += len(stale)
