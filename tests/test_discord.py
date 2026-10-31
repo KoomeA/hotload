@@ -338,3 +338,10 @@ def test_registering_commands_sends_the_bot_token_only_to_discord_and_never_prin
     assert sent["url"] == f"https://discord.com/api/v10/applications/{APP_ID}/commands"
     assert sent["headers"] == {"Authorization": "Bot BOT-TOKEN-SECRET"} and sent["json"] == discord.COMMANDS
     assert "BOT-TOKEN-SECRET" not in capsys.readouterr().out
+
+
+def test_many_throwaway_accounts_cannot_add_up_to_unlimited_work(c):
+    """Each person is within their own limit, but the bot as a whole stops at 300 requests a minute."""
+    for user in range(1, 306):
+        post(c, command("download", {"link": f"https://example.com/{user}"}, user=str(user)))
+    assert len(c.queued) == 300

@@ -421,7 +421,4 @@ def test_packaging_ignores_sidecar_files(tmp_path):
     assert engine.package(tmp_path).name == "v.mp4"  # one deliverable, no sidecars zipped in
 
 
-def test_telegram_has_a_bot_wide_limit_on_top_of_the_per_chat_one():
-    from hotload.api import bots
-
-    assert "tgglobal" in open(bots.__file__).read()
+# The bot-wide cap on top of the per-requester one is tested by behaviour in test_bot.py and test_discord.py.
