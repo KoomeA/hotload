@@ -2,12 +2,13 @@
 
     HOTLOAD_TEST_POSTGRES_URL=postgresql+asyncpg://postgres@127.0.0.1:5433 pytest tests/test_postgres.py
 
-The URL is the server (no database name): each test creates and drops its own throwaway database.
+Only the server part of the URL is used (a database name is ignored): each test creates and drops its own throwaway database.
 """
 
 import asyncio
 import os
 import secrets
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -15,7 +16,9 @@ from hotload import migrations
 from hotload.config import Settings
 from hotload.db import Database
 
-BASE = os.environ.get("HOTLOAD_TEST_POSTGRES_URL", "").rstrip("/")
+_RAW = os.environ.get("HOTLOAD_TEST_POSTGRES_URL", "").rstrip("/")
+# Accept the same variable as tests/postgres_plugin.py (which names a database): only the server part is used here.
+BASE = "{0.scheme}://{0.netloc}".format(urlsplit(_RAW)) if _RAW else ""
 pytestmark = pytest.mark.skipif(not BASE, reason="set HOTLOAD_TEST_POSTGRES_URL to run the PostgreSQL checks")
 
 
