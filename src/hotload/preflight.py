@@ -17,6 +17,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 
+from . import notify
 from .config import Settings, get_settings
 
 FAIL, WARN, OK, INFO = "FAIL", "WARN", "OK", "INFO"
@@ -137,6 +138,12 @@ def check(s: Settings, which: Callable[[str], str | None] = shutil.which) -> lis
         add(WARN, "cookies-vault", "saved cookies are on: keep HOTLOAD_COOKIE_KEY in a secret manager, apart from database backups (docs/COOKIES.md).")
     if s.telegram_bot_token and not (s.telegram_webhook_secret and https):
         add(FAIL, "bot", "Telegram bot needs HOTLOAD_TELEGRAM_WEBHOOK_SECRET and an https HOTLOAD_PUBLIC_URL.")
+    if (s.discord_public_key or s.discord_application_id) and not notify.discord_enabled(s):
+        add(WARN, "bot", "Discord is half configured: HOTLOAD_DISCORD_PUBLIC_KEY, HOTLOAD_DISCORD_APPLICATION_ID and HOTLOAD_PUBLIC_URL are all required; the bot stays off.")
+    elif notify.discord_enabled(s):
+        if not https:
+            add(FAIL, "bot", "Discord only calls https:// interaction endpoints: set an https HOTLOAD_PUBLIC_URL.")
+        add(INFO, "bot", "Discord bot is on: set the Interactions Endpoint URL to <PUBLIC_URL>/api/v1/bots/discord and run `python -m hotload.admin discord-commands`.")
     if s.github_client_id or s.google_client_id:
         add(INFO, "oauth", "OAuth is on: register callbacks at <PUBLIC_URL>/api/v1/auth/oauth/<provider>/callback and test live.")
 

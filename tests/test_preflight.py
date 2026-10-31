@@ -81,3 +81,14 @@ def test_email_checks():
 
 def test_hosted_without_a_mail_provider_is_warned():
     assert WARN in levels(check(Settings(**GOOD_HOSTED), HAVE_ALL), "email")
+
+
+def test_discord_checks():
+    pub = "ab" * 32
+    ok_cfg = dict(discord_public_key=pub, discord_application_id="123")
+    on = check(Settings(**GOOD_HOSTED, **ok_cfg), HAVE_ALL)
+    assert FAIL not in levels(on, "bot")
+    half = check(Settings(**GOOD_HOSTED, discord_public_key=pub), HAVE_ALL)
+    assert WARN in levels(half, "bot")                       # no application id: the bot stays off
+    insecure = check(Settings(**{**GOOD_HOSTED, "public_url": "http://hotload.example"}, **ok_cfg), HAVE_ALL)
+    assert FAIL in levels(insecure, "bot")                   # Discord only calls https endpoints

@@ -4,16 +4,14 @@ Anyone who can message the bot is an anonymous user for limits and quotas, keyed
 confirm it is 18+. Replies are plain text because titles and URLs are untrusted input.
 """
 
-import asyncio
 import hmac
 import logging
 import re
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
-from .. import compliance, notify, ratelimit, security, tiers
+from .. import botcore, notify
 from ..config import Settings
-from ..logging_setup import log
 
 logger = logging.getLogger("hotload.bot")
 URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
@@ -64,30 +62,8 @@ def add_bot_routes(app: FastAPI, settings: Settings) -> None:
         return (await redis().get(f"hotload:tg:preset:{chat_id}")) or DEFAULT_PRESET
 
     async def request_download(chat_id: int, url: str, preset: str) -> None:
-        if not await ratelimit.allow(redis(), f"tg:{chat_id}", 10, 60) or not await ratelimit.allow(redis(), "tgglobal", 300, 60):
-            # per chat, plus one bot-wide cap so many throwaway accounts cannot add up to unlimited work
-            return await say(chat_id, "Slow down a little, then send the link again.")
-        try:
-            clean = await asyncio.to_thread(security.validate_url, url, settings)
-        except security.UnsafeURL as exc:
-            return await say(chat_id, f"I can't use that link: {exc}.")
-        if (await app.state.rules.get()).blocks_url(clean):
-            return await say(chat_id, "That content is not available.")
-        confirmed = bool(await redis().get(f"hotload:tg:age:{chat_id}"))
-        try:
-            adult = compliance.enforce_age_gate(clean, None, confirmed, settings.require_age_gate)
-        except compliance.AgeGateRequired:
-            return await say(chat_id, "That looks like adult content." + notify.AGE_HINT)
-        tier = tiers.TIERS["anonymous"]
-        if settings.quotas_enabled and not await tiers.consume(redis(), f"tg:{chat_id}", tier):
-            return await say(chat_id, f"Daily limit reached ({tier.jobs_per_window} downloads per 12 hours).")
-        job = await app.state.store.create(
-            url=clean, preset=preset, adult=adult, age_confirmed=confirmed,
-            max_duration=tier.max_duration if settings.quotas_enabled else None,
-            notify={"kind": "telegram", "chat_id": chat_id})
-        await app.state.enqueue(job.id, None)
-        log(logger, "bot job queued", job=job.id, preset=preset)
-        await say(chat_id, "Queued. I'll message you when it's ready.")
+        await say(chat_id, await botcore.request_download(
+            app, settings, "tg", chat_id, url, preset, {"kind": "telegram", "chat_id": chat_id}, notify.AGE_HINT))
 
     async def handle(update: dict) -> None:
         parsed = parse_message(update)

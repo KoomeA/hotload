@@ -2,6 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -58,6 +59,12 @@ class Settings(BaseSettings):
     telegram_webhook_secret: str | None = None  # Telegram echoes it in X-Telegram-Bot-Api-Secret-Token
     telegram_allowed_chats: list[int] = []  # empty = anyone may use the bot
     telegram_api_base: str = "https://api.telegram.org"
+    # --- Discord bot (slash commands over the interactions webhook; needs public_url too) ---
+    discord_public_key: str | None = None  # the application's public key (hex), from the developer portal: verifies every request
+    discord_application_id: str | None = None
+    discord_bot_token: str | None = None  # only used by `python -m hotload.admin discord-commands`, never by the running API
+    discord_allowed_users: list[int] = []  # empty = anyone who can run the commands
+    discord_api_base: str = "https://discord.com/api/v10"
     redis_url: str = "redis://localhost:6379/0"
     data_dir: Path = Path("data")
     file_ttl_seconds: int = 3600
@@ -91,6 +98,26 @@ class Settings(BaseSettings):
     trust_proxy_headers: bool = False  # honour X-Forwarded-For (set behind a reverse proxy)
     trusted_proxy_hops: int = 1  # reverse proxies in front of the app; the client IP is the Nth entry from the RIGHT
     ffmpeg_location: str | None = None
+
+    @field_validator("discord_public_key")
+    @classmethod
+    def _discord_key_is_hex(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        try:
+            ok = len(bytes.fromhex(v.strip())) == 32
+        except ValueError:
+            ok = False
+        if not ok:
+            raise ValueError("HOTLOAD_DISCORD_PUBLIC_KEY must be the 64 hex characters shown under General Information in the Discord developer portal")
+        return v.strip().lower()
+
+    @field_validator("discord_application_id")
+    @classmethod
+    def _discord_app_id_is_digits(cls, v: str | None) -> str | None:
+        if v and not v.strip().isdigit():
+            raise ValueError("HOTLOAD_DISCORD_APPLICATION_ID must be the numeric application id")
+        return v.strip() if v else None
 
     @property
     def mail_enabled(self) -> bool:

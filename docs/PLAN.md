@@ -73,11 +73,12 @@ Code layout (`src/hotload`):
 - [x] Chromium extension (MV3, minimal permissions) and a drag-to-bookmarks bookmarklet; share-target already existed.
 - [x] Telegram bot (webhook, per-chat limits, 18+ confirmation, link replies).
 - [x] Firefox build (`extension/build.mjs`): same code, event-page manifest; browser-tested in real Firefox 159 (8 steps).
-- [ ] Not built: Discord bot, scheduled "record at time X"/wait-for-upcoming (would pin a worker for hours), Safari build,
+- [x] Discord bot (signed interactions webhook, slash commands, private replies; docs/BOTS.md; not run against live Discord).
+- [ ] Not built: scheduled "record at time X"/wait-for-upcoming (would pin a worker for hours), Safari build,
   store listings (the Firefox id is a placeholder until you choose one), extension context-menu click test (native menus cannot be driven by the test harness),
   localised extension UI, sending files (not just links) through Telegram.
 - [ ] Not verified end to end: SponsorBlock against real YouTube segments (options and postprocessor definitions are tested,
-  the live fetch was blocked from the test environment), the Telegram bot against the real Telegram API.
+  the live fetch was blocked from the test environment), the Telegram and Discord bots against the real APIs.
 
 ### Launch readiness (2026-10-30) - review done, gates remain (see docs/LAUNCH.md)
 - [x] Four independent security reviews; every finding verified, fixed with regression tests, or recorded as accepted.
