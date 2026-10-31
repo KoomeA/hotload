@@ -3,6 +3,7 @@
   import CookiesSection from '#lib/components/CookiesSection.svelte';
   import KeysSection from '#lib/components/KeysSection.svelte';
   import PlansSection from '#lib/components/PlansSection.svelte';
+  import RecordingsSection from '#lib/components/RecordingsSection.svelte';
   import { ApiError, api } from '#lib/api.js';
   import { t } from '#lib/i18n.svelte.js';
   import { refreshSession, session } from '#lib/session.svelte.js';
@@ -161,6 +162,8 @@
   <PlansSection {me} onchange={load} />
 
   {#if me}<KeysSection {me} />{/if}
+
+  {#if me}<RecordingsSection {me} />{/if}
 
   <CookiesSection />
 

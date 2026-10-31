@@ -92,3 +92,12 @@ def test_discord_checks():
     assert WARN in levels(half, "bot")                       # no application id: the bot stays off
     insecure = check(Settings(**{**GOOD_HOSTED, "public_url": "http://hotload.example"}, **ok_cfg), HAVE_ALL)
     assert FAIL in levels(insecure, "bot")                   # Discord only calls https endpoints
+
+
+def test_scheduling_checks():
+    base = check(Settings(**GOOD_HOSTED, **MAIL), HAVE_ALL)
+    assert not [f for f in base if f.topic == "scheduling" and f.level != "INFO"]
+    greedy = check(Settings(**GOOD_HOSTED, **MAIL, max_scheduled_running=6), HAVE_ALL)
+    assert WARN in levels(greedy, "scheduling")                      # could take every worker slot
+    off = check(Settings(**GOOD_HOSTED, **MAIL, max_scheduled_running=6, scheduled_enabled=False), HAVE_ALL)
+    assert "scheduling" not in {f.topic for f in off}

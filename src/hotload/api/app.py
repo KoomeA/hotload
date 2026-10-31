@@ -52,6 +52,7 @@ from .bots import add_bot_routes
 from .cookies import add_cookie_routes
 from .discord import add_discord_routes
 from .keys import add_key_routes, record_usage
+from .schedules import add_schedule_routes
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -579,6 +580,11 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
             raise HTTPException(404, "File is not available")
         return FileResponse(job.path, filename=job.filename)
 
+    # Helpers the scheduling routes share with the job routes (they live in closures here).
+    app.state.who, app.state.guard = who, guard
+    app.state.run_extract, app.state.extract_with_retries = run_extract, extract_with_retries
+    app.state.precheck_live = lambda url, preset, minutes, age_ok, tier: precheck(
+        url, JobOptions(preset=preset, live_minutes=minutes, age_confirmed=age_ok), tier)
     add_account_routes(app, settings, client_ip)
     add_billing_routes(app, settings, client_ip)
     add_key_routes(app, settings)
@@ -586,6 +592,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None, enq
     add_cookie_routes(app, settings, client_ip)
     add_bot_routes(app, settings)
     add_discord_routes(app, settings)
+    add_schedule_routes(app, settings)
 
     web_dir = settings.web_dir or WEB_DIR
     if web_dir.exists():

@@ -13,6 +13,7 @@ from sqlalchemy import (
     UniqueConstraint,
     delete,
     event,
+    func,
     select,
     update,
 )
@@ -117,6 +118,31 @@ class PaymentEvent(Base):
     def public(self) -> dict:
         return {"at": self.at, "kind": self.kind, "actor": self.actor, "from": self.from_status, "to": self.to_status,
                 "entitlement": self.entitlement, "note": self.note}
+
+
+class Schedule(Base):
+    """A recording that will start when a stream goes live. It waits here, in the database: no worker is held meanwhile."""
+
+    __tablename__ = "scheduled_recordings"
+    __table_args__ = (Index("ix_sched_state_start", "state", "start_at"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(String(32), index=True)
+    url: Mapped[str] = mapped_column(String(2048))
+    start_at: Mapped[float] = mapped_column(Float)  # planned start; the stream is polled from here on
+    minutes: Mapped[int] = mapped_column(Integer)
+    preset: Mapped[str] = mapped_column(String(16))
+    adult: Mapped[bool] = mapped_column(Boolean, default=False)
+    age_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+    state: Mapped[str] = mapped_column(String(10), default="waiting")  # waiting | queued | missed | failed | cancelled
+    job_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    message: Mapped[str] = mapped_column(String(200), default="")
+    next_check: Mapped[float] = mapped_column(Float, default=0.0)
+    created: Mapped[float] = mapped_column(Float, default=time.time)
+
+    def public(self) -> dict:
+        return {"id": self.id, "url": self.url, "start_at": self.start_at, "minutes": self.minutes, "preset": self.preset,
+                "state": self.state, "message": self.message, "job_id": self.job_id, "created": self.created}
 
 
 class ApiKey(Base):
@@ -287,6 +313,7 @@ class Database:
             await s.execute(delete(HistoryEntry).where(HistoryEntry.user_id == user_id))
             await s.execute(delete(UserCookie).where(UserCookie.user_id == user_id))
             await s.execute(delete(ApiKey).where(ApiKey.user_id == user_id))
+            await s.execute(delete(Schedule).where(Schedule.user_id == user_id, Schedule.state == "waiting"))
             await s.execute(delete(User).where(User.id == user_id))
             await s.commit()
 
@@ -452,6 +479,65 @@ class Database:
             user.tier, user.tier_expires = tier, expires
             await s.commit()
 
+    # --- scheduled recordings
+    async def add_schedule(self, per_user_cap: int, total_cap: int, **kwargs) -> "Schedule | str":
+        """Insert a waiting schedule, or return the reason it was refused ("user_cap" / "total_cap")."""
+        async with self.session() as s, s.begin():
+            waiting = Schedule.state == "waiting"
+            mine = (await s.execute(select(func.count()).select_from(Schedule)
+                                    .where(waiting, Schedule.user_id == kwargs["user_id"]))).scalar_one()
+            if mine >= per_user_cap:
+                return "user_cap"
+            if (await s.execute(select(func.count()).select_from(Schedule).where(waiting))).scalar_one() >= total_cap:
+                return "total_cap"
+            row = Schedule(**kwargs)
+            s.add(row)
+        return row
+
+    async def get_schedule(self, schedule_id: str) -> "Schedule | None":
+        async with self.session() as s:
+            return await s.get(Schedule, schedule_id)
+
+    async def list_schedules(self, user_id: str, limit: int = 50) -> list["Schedule"]:
+        async with self.session() as s:
+            q = select(Schedule).where(Schedule.user_id == user_id).order_by(Schedule.start_at.desc()).limit(limit)
+            return list((await s.execute(q)).scalars())
+
+    async def cancel_schedule(self, user_id: str, schedule_id: str) -> str | None:
+        """waiting -> cancelled; a finished row is removed; a released one (its recording may be running) is refused."""
+        async with self.session() as s, s.begin():
+            row = await s.get(Schedule, schedule_id)
+            if row is None or row.user_id != user_id:
+                return None
+            if row.state == "waiting":
+                res = await s.execute(update(Schedule).where(Schedule.id == schedule_id, Schedule.state == "waiting")
+                                      .values(state="cancelled", message="Cancelled"))
+                return "cancelled" if res.rowcount == 1 else "busy"
+            if row.state == "queued":
+                return "busy"
+            await s.delete(row)
+            return "deleted"
+
+    async def due_schedules(self, now: float, limit: int = 100) -> list["Schedule"]:
+        async with self.session() as s:
+            q = (select(Schedule).where(Schedule.state == "waiting", Schedule.start_at <= now, Schedule.next_check <= now)
+                 .order_by(Schedule.next_check, Schedule.start_at).limit(limit))  # never-checked first: no starvation
+            return list((await s.execute(q)).scalars())
+
+    async def settle_schedule(self, schedule_id: str, state: str, message: str = "", job_id: str | None = None) -> bool:
+        """waiting -> queued/missed/failed. Compare-and-set, so a cancel or another worker's release wins cleanly."""
+        async with self.session() as s:
+            res = await s.execute(update(Schedule).where(Schedule.id == schedule_id, Schedule.state == "waiting")
+                                  .values(state=state, message=message[:200], job_id=job_id))
+            await s.commit()
+            return res.rowcount == 1
+
+    async def defer_schedule(self, schedule_id: str, next_check: float) -> None:
+        async with self.session() as s:
+            await s.execute(update(Schedule).where(Schedule.id == schedule_id, Schedule.state == "waiting")
+                            .values(next_check=next_check))
+            await s.commit()
+
     # --- saved cookies
     async def put_cookie(self, user_id: str, domain: str, blob: str, count: int) -> None:
         async with self.session() as s:
@@ -524,7 +610,6 @@ class Database:
             return report.public()
 
     async def counts(self) -> dict:
-        from sqlalchemy import func
 
         async with self.session() as s:
             users = (await s.execute(select(func.count()).select_from(User))).scalar_one()
@@ -532,8 +617,9 @@ class Database:
             open_reports = (await s.execute(select(func.count()).select_from(Report).where(Report.status == "open"))).scalar_one()
             held = (await s.execute(select(func.count()).select_from(Payment).where(Payment.status == "held"))).scalar_one()
             disputed = (await s.execute(select(func.count()).select_from(Payment).where(Payment.status == "disputed"))).scalar_one()
+            scheduled = (await s.execute(select(func.count()).select_from(Schedule).where(Schedule.state == "waiting"))).scalar_one()
             return {"users": users, "paid_payments": paid, "open_reports": open_reports, "held_payments": held,
-                    "disputed_payments": disputed}
+                    "disputed_payments": disputed, "scheduled_waiting": scheduled}
 
     # --- API keys
     async def create_key(self, user_id: str, name: str, key_hash: str, webhook_secret: str, key_id: str) -> ApiKey:

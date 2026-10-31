@@ -42,12 +42,13 @@ class Job:
     key_id: str | None = None
     storage_key: str | None = None
     webhook_url: str | None = None
+    retention: int | None = None  # seconds the finished job and its file are kept (None = the server defaults)
     created: float = field(default_factory=time.time)
     token: str = field(default_factory=lambda: secrets.token_urlsafe(24))
 
     def public(self) -> dict:
         d = asdict(self)
-        for hidden in ("path", "token", "url", "age_confirmed", "user_id", "max_duration", "max_filesize", "key_id", "webhook_url", "storage_key", "notify"):
+        for hidden in ("path", "token", "url", "age_confirmed", "user_id", "max_duration", "max_filesize", "key_id", "webhook_url", "storage_key", "notify", "retention"):
             d.pop(hidden)
         d["download_url"] = f"/api/v1/jobs/{self.id}/file?token={self.token}" if self.state == "done" else None
         return d
@@ -67,7 +68,7 @@ class JobStore:
         return job
 
     async def save(self, job: Job) -> None:
-        await self.redis.set(self.key(job.id), json.dumps(asdict(job)), ex=self.ttl)
+        await self.redis.set(self.key(job.id), json.dumps(asdict(job)), ex=job.retention or self.ttl)
 
     async def get(self, job_id: str) -> Job | None:
         raw = await self.redis.get(self.key(job_id))

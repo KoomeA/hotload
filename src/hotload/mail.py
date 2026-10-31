@@ -62,3 +62,12 @@ def reset_message(link: str) -> tuple[str, str]:
             f"Open this link to choose a new password:\n\n{link}\n\n"
             "It works once and expires in 1 hour. If you did not ask for this, ignore this message: "
             "your password has not changed.\n")
+
+
+def recording_message(link: str, title: str | None, ok: bool, detail: str, keep_hours: int) -> tuple[str, str]:
+    if ok:
+        return ("Your scheduled recording is ready",
+                f"Your scheduled recording is ready: {title or 'your file'}\n\nDownload it from your account:\n{link}\n\n"
+                f"It stays available for about {keep_hours} hours.\n")
+    return ("Your scheduled recording did not happen",
+            f"Your scheduled recording could not be completed: {detail}\n\nYou can schedule it again from your account:\n{link}\n")

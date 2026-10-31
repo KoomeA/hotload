@@ -117,6 +117,15 @@ def check(s: Settings, which: Callable[[str], str | None] = shutil.which) -> lis
         if cur.upper() not in ("USD", "KES", "NGN", "GHS", "ZAR"):
             add(INFO, "payments", f"prices set for {cur.upper()}: Paystack will not offer it (subunit handling unconfirmed); BTCPay will.")
 
+    # --- scheduled recording
+    if s.scheduled_enabled and s.max_scheduled_running >= 4:
+        add(WARN, "scheduling", f"HOTLOAD_MAX_SCHEDULED_RUNNING={s.max_scheduled_running}: each worker runs 4 jobs, so this many "
+            "scheduled recordings can take every slot of a small deployment. Keep it below workers x 4.")
+    if s.scheduled_enabled and hosted and not s.egress_filtered:
+        add(INFO, "scheduling", "scheduled recordings are refused until HOTLOAD_EGRESS_FILTERED is on (they use live recording).")
+    if s.scheduled_enabled and not s.mail_enabled:
+        add(INFO, "scheduling", "no mail provider: owners are not emailed when a scheduled recording finishes or is missed (they can still see it in the account page).")
+
     # --- email
     if s.smtp_host and not s.mail_enabled:
         add(WARN, "email", "SMTP is half configured: HOTLOAD_SMTP_HOST, HOTLOAD_MAIL_FROM and an https HOTLOAD_PUBLIC_URL are all required; mail stays off.")

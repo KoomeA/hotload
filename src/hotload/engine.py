@@ -269,6 +269,7 @@ def summarise(info: dict) -> dict:
         "age_limit": info.get("age_limit") or 0,
         "is_live": bool(info.get("is_live")),
         "live_status": info.get("live_status"),
+        "release_timestamp": info.get("release_timestamp") if isinstance(info.get("release_timestamp"), (int, float)) else None,
         "heights": heights,
         "has_subtitles": bool(info.get("subtitles")),
         "subtitles": sorted(info.get("subtitles") or {})[:60],

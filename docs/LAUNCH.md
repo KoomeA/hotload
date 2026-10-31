@@ -51,6 +51,7 @@ Things that **only you / a staging environment can verify**. I could not do them
 - [ ] Paystack **test mode** end to end (checkout, webhook, verify, return page). API details were cross-checked from third-party guides only.
 - [ ] BTCPay staging store: invoice, testnet payment, `InvoiceSettled` grants the plan; a late/underpaid/expired invoice behaves as documented.
 - [ ] OAuth (GitHub/Google) live; Telegram webhook registered and a test chat; Discord endpoint saved in the portal, commands registered and each run once; S3/R2 upload, signed URL, ZIP stream, cleanup.
+- [ ] Schedule a real recording of a real channel that goes live (docs/SCHEDULING.md) and set `HOTLOAD_MAX_SCHEDULED_RUNNING` below your worker slots.
 - [ ] Confirm YouTube and the other top sites work from your production egress IPs (datacentre IPs get blocked); budget proxies.
 
 **Product gaps to decide on**

@@ -83,7 +83,7 @@ const linkIn = (text, kind) => {
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || undefined });
 const ctx = await browser.newContext({ locale: 'en-US', viewport: { width: 1000, height: 900 } });
 const page = await ctx.newPage();
-page.on('console', (m) => { if (['error', 'warning'].includes(m.type()) && !/401|Unauthorized/.test(m.text())) problems.push(`console ${m.type()}: ${m.text()}`); });
+page.on('console', (m) => { if (['error', 'warning'].includes(m.type()) && !/401|Unauthorized|422|Unprocessable/.test(m.text())) problems.push(`console ${m.type()}: ${m.text()}`); });
 page.on('response', (r) => { if (r.url().includes('/api/v1/auth/')) console.log('  <-', r.status(), r.request().method(), r.url().replace(BASE, '')); });
 page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
 
@@ -206,6 +206,37 @@ await step('winning a dispute restores the plan; refunding the held payment clos
   await page.getByText('Nothing needs a decision.').waitFor({ timeout: 15000 });
   ok((await tierOf('buyer1@example.com')) === 'premium', 'the plan did not come back');
   ok((await tierOf('buyer2@example.com')) === 'pro', 'refunding the held payment changed the Pro plan');
+});
+
+await step('scheduled recordings: schedule from the account page, see it waiting, cancel it, remove it', async () => {
+  await ready(`${BASE}/account/`);
+  await page.getByRole('heading', { name: 'Scheduled recordings' }).waitFor({ timeout: 15000 });
+  await page.getByText('Nothing scheduled.').waitFor();
+  const local = await page.evaluate(() => {
+    const d = new Date(Date.now() + 2 * 3600 * 1000);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  });
+  await page.getByLabel('Live stream link').fill('https://example.com/live/channel');
+  await page.getByLabel('Start time').fill(local);
+  await page.getByLabel('Minutes').fill('20');
+  await page.getByRole('button', { name: 'Schedule recording' }).click();
+  await page.getByText('Scheduled.', { exact: true }).waitFor({ timeout: 15000 });
+  const row = page.locator('#recordings li', { hasText: 'example.com' });
+  await row.getByText('Waiting for the stream').waitFor();
+  await row.getByText('20 min').waitFor();
+  await row.getByRole('button', { name: 'Cancel' }).click();
+  await row.getByText('Cancelled').waitFor({ timeout: 15000 });
+  await row.getByRole('button', { name: 'Remove' }).click();
+  await page.getByText('Nothing scheduled.').waitFor({ timeout: 15000 });
+});
+
+await step('scheduled recordings: a past time and a page with no announced time are explained', async () => {
+  await page.getByLabel('Live stream link').fill('https://example.com/live/other');
+  await page.getByLabel('Start time').fill('2020-01-01T10:00');
+  await page.getByLabel('Minutes').fill('10');
+  await page.getByRole('button', { name: 'Schedule recording' }).click();
+  await page.getByText(/Choose a time in the future/).waitFor({ timeout: 15000 });
 });
 
 await browser.close();

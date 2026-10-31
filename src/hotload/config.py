@@ -54,6 +54,15 @@ class Settings(BaseSettings):
     # Generate one with: python -m hotload.admin cookie-key
     cookie_key: str | None = None
     max_live_minutes: int = 60  # longest live recording a job may request (a worker slot is held that long)
+    # --- scheduled recording: a schedule waits in the database (no worker is held) and is released when the stream is live ---
+    scheduled_enabled: bool = True
+    max_scheduled_per_user: int = 10  # waiting schedules per account when plans are not enforced (plans set their own)
+    max_scheduled_total: int = 500  # waiting schedules on the whole server
+    schedule_horizon_days: int = 14  # furthest ahead a recording may be scheduled
+    schedule_grace_minutes: int = 30  # how long past the planned start to keep waiting for a stream that has not begun
+    max_scheduled_running: int = 2  # scheduled recordings that may run at once (keep it below your total worker slots: 4 per worker)
+    schedule_probes_per_tick: int = 10  # liveness checks per 30 s tick, so many schedules cannot hammer the sites
+    scheduled_keep_hours: int = 24  # how long a finished scheduled recording stays downloadable (normal files: file_ttl_seconds)
     # --- Telegram bot (needs public_url too: replies carry download links) ---
     telegram_bot_token: str | None = None
     telegram_webhook_secret: str | None = None  # Telegram echoes it in X-Telegram-Bot-Api-Secret-Token

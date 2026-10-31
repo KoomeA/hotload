@@ -88,7 +88,10 @@ def add_account_routes(app: FastAPI, settings: Settings, client_ip) -> None:
 
     def _limits(t: tiers.Tier) -> dict:
         return {"jobs_per_12h": t.jobs_per_window, "max_minutes": t.max_duration // 60, "batch_size": t.batch_size,
-                "trim_video": t.trim_video, "audio_tracks": t.audio_tracks, "enforced": settings.quotas_enabled}
+                "trim_video": t.trim_video, "audio_tracks": t.audio_tracks, "enforced": settings.quotas_enabled,
+                "live_minutes": t.live_minutes if settings.quotas_enabled else settings.max_live_minutes,
+                "scheduled": (t.scheduled_max if settings.quotas_enabled else settings.max_scheduled_per_user)
+                if settings.scheduled_enabled else 0}
 
     def link(path: str, token: str) -> str:
         # The token sits in the URL fragment: browsers never send it to servers, proxies, logs or Referer headers.
