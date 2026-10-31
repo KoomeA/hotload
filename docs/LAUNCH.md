@@ -12,7 +12,7 @@ contradicted things I had told you earlier. They are listed here so nobody relie
 | Finding | Severity | Status |
 |---|---|---|
 | **SSRF guard did not cover redirects/DNS rebinding** (my M1 claim was wrong; reproduced: an internal server was reached) | High | Fixed: connect-time guard, every FFmpeg URL validated, FFmpeg protocol whitelist; FFmpeg features need the egress filter |
-| Hardened overlay did not protect the API container; FFmpeg ignores upper-case proxy vars | High | Fixed (overlay rewritten); **untested: no container runtime here** |
+| Hardened overlay did not protect the API container; FFmpeg ignores upper-case proxy vars | High | Fixed (overlay rewritten); egress proxy now run for real (see 2a); the full stack still not brought up |
 | Cheaper plan could extend a higher plan (~395 Pro days for ~$114) | High | Fixed: such payments are held for review |
 | Pre-hijack: unverified registration + OAuth link kept the attacker's password | High | Fixed: takeover on first verified login (password, sessions, keys, cookies cut off) |
 | Metadata fetch could pin threads/memory (endless or dripping page) | High | Fixed: deadline + byte cap, bounded pool, 503 when busy |
@@ -31,6 +31,29 @@ Also found by testing, not by the reviewers: the `no_proxy` list was being treat
 hostname-only proxy exemption exposed every port on a loopback proxy, a test that "proved" bot tokens stay out of logs was
 capturing nothing, and the pinned-IP technique fails behind proxies that refuse CONNECT to a bare IP.
 
+## 2a. What running the checklist found (2026-10-31)
+A PostgreSQL 16 server and a Docker daemon turned out to be available, so part of the infrastructure checklist could be run for real.
+Running it found four bugs that reading the code, and a SQLite-only test suite, had not:
+
+| Found by running | Impact | Status |
+|---|---|---|
+| `squid.conf` used `access_log stdio:/dev/stdout`; squid runs as an unprivileged user and cannot open it: **squid crashed at startup** | The hardened stack could not start (api and workers depend on it) | Fixed: logs to the file the image forwards to `docker logs` |
+| Squid ignores its IPv6 deny list when IPv6 is disabled, so a NAT64 / 6to4 literal (e.g. `[64:ff9b::a00:1]`, which is 10.0.0.1) was **not refused by policy** | Egress filter gap for IPv6-literal targets | Fixed: IPv6 literals are refused outright (`acl ipv6_literal`) |
+| **Concurrent first-run migrations collided** on PostgreSQL: with 3 processes starting together, 2 crashed with a duplicate-key error (the checklist already warned of it) | A first deploy of api + worker + worker-priority could fail to come up | Fixed: a PostgreSQL advisory lock in `migrations/env.py`; 3 rounds of 4 simultaneous starts all succeed |
+
+| **Concurrent refunds of one payment could take the plan's days back more than once on PostgreSQL**: `reverse_payment` changed the user before its compare-and-set on the payment, and a losing caller's change was committed anyway. SQLite serialises writers, so every SQLite test passed | High (customers losing paid days) | Fixed: the payment row is locked first. Found only by running the suite on PostgreSQL; the test fails without the fix |
+
+Run and passing: migrations from empty and from an older revision with data (PostgreSQL 16); the **whole test suite on PostgreSQL**
+(`tests/postgres_plugin.py`, usage in its docstring; `tests/test_postgres.py` holds the checks that only mean something there); `pg_dump` / `pg_restore` into a new database with the app starting cleanly on the copy (users,
+password hashes, payments and their audit trail, schedules, cookies intact); the preflight on the documented hosted configuration
+(0 failures) and on the review's mistakes (each a failure); the egress filter's deny rules (`deploy/egress/check.sh`, on an
+internal Docker network with no route out, with a negative control that fails without the fix).
+
+**Not run, and why:** the app image build and the full hardened stack (building needs outbound network access that this session's
+policy does not give containers, and Caddy needs a real domain); the egress filter's *allow* side from a real worker (a public
+address is only shown to be "not refused by policy", not reached); a trim job whose media URL redirects to an internal address
+(needs the full stack); managed PostgreSQL / Redis, S3 and every real third-party service; load testing.
+
 ## 2. Gates: do not launch publicly until these are true
 Things that **only you / a staging environment can verify**. I could not do them here.
 
@@ -41,11 +64,11 @@ Things that **only you / a staging environment can verify**. I could not do them
 - [ ] Tax treatment (VAT/digital services) decided; business bank account and payout flow in place.
 
 **Infrastructure (staging first)**
-- [ ] **Build the images and bring up the hardened overlay** (`docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.hardened.yml --profile hosted up`). It has never been run.
-- [ ] **Prove the egress filter works** from inside a worker container: `curl -m 5 http://169.254.169.254/` and `curl -m 5 http://10.0.0.1/` must fail; `curl -m 5 https://example.com/` must work. Then submit a trim job whose media URL redirects to an internal address and confirm it fails. Only then set `HOTLOAD_EGRESS_FILTERED=true`.
-- [ ] PostgreSQL (not SQLite), managed Redis, S3/R2 bucket (private), TLS via the edge proxy, backups of the database **and a restore drill**.
-- [ ] Pin the squid and Caddy images to tested tags/digests; add memory/disk alerts; put `/data` (or the scratch volume) on a size-limited volume.
-- [ ] Migrations: run `alembic upgrade head` once before starting several replicas (two simultaneous first runs can collide).
+- [ ] **Build the images and bring up the hardened overlay** (the egress proxy alone has been run; the rest has not) (`docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.hardened.yml --profile hosted up`). It has never been run.
+- [ ] **Prove the egress filter works** from inside a worker container (the deny rules are proven by `deploy/egress/check.sh`; what remains is the allow side and the redirect job): `curl -m 5 http://169.254.169.254/` and `curl -m 5 http://10.0.0.1/` must fail; `curl -m 5 https://example.com/` must work. Then submit a trim job whose media URL redirects to an internal address and confirm it fails. Only then set `HOTLOAD_EGRESS_FILTERED=true`.
+- [ ] Managed PostgreSQL (the suite, migrations and a dump/restore drill pass on PostgreSQL 16), managed Redis, S3/R2 bucket (private), TLS via the edge proxy, and *your* backup system with *its* restore drill (the application side of one has been proven).
+- [ ] Pin the Caddy image (squid is pinned to the tested digest); add memory/disk alerts; put `/data` (or the scratch volume) on a size-limited volume.
+- [x] Migrations are safe to start from several processes at once (advisory lock; tested). Running `alembic upgrade head` once first is still tidy but no longer required.
 
 **Integrations with real services**
 - [ ] Paystack **test mode** end to end (checkout, webhook, verify, return page). API details were cross-checked from third-party guides only.

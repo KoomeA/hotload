@@ -1,5 +1,6 @@
-# Production overlay. NOT RUN in the environment this repository was developed in (no container runtime there):
-# test it on a staging host before relying on it. Use with:
+# Production overlay. What has and has not been run: the egress proxy (egress/squid.conf) was run for real and its deny rules are
+# checked by egress/check.sh (that run found two bugs, both fixed). The whole stack was NOT brought up (the app image could not be
+# built where this was developed, and Caddy needs a real domain): test it on a staging host before relying on it. Use with:
 #   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.hardened.yml --profile hosted up -d
 # Set HOTLOAD_DOMAIN, and in .env: HOTLOAD_PUBLIC_URL=https://<domain>, HOTLOAD_EGRESS_FILTERED=true (only after the
 # egress filter below is confirmed to work; it unlocks trimming and live recording on the hosted service).
@@ -13,8 +14,7 @@
 #     guard cannot see. Both lower- and upper-case proxy variables are set: FFmpeg reads the lower-case ones.
 #
 # Things you must still do
-#   * Pin the squid image to a tag or digest you have tested (the line below uses a floating tag on purpose so it cannot
-#     be wrong here; do not ship it floating).
+#   * Pin the caddy image too (it is floating below). The squid image is pinned to the digest its rules were tested against.
 #   * If your database or BTCPay Server is on a private address, add its host to NO_PROXY below, or the proxy (correctly)
 #     refuses to reach it.
 #   * HOTLOAD_PROXY_URLS (upstream residential proxies) are reached THROUGH this filter only if the provider is reachable
@@ -42,7 +42,9 @@ services:
     cap_add: [NET_BIND_SERVICE]
     security_opt: ["no-new-privileges:true"]
   egress:
-    image: ubuntu/squid:latest
+    # Pinned to the image the deny rules were tested against (Squid 6.13). If the digest does not resolve on your registry, pull
+    # a current ubuntu/squid, run egress/check.sh against it, and pin that one instead.
+    image: ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029
     volumes: ["./egress/squid.conf:/etc/squid/squid.conf:ro"]
     networks: [internal, internet]
     restart: unless-stopped

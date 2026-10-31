@@ -416,7 +416,10 @@ class Database:
         allowed, target = self._REVERSALS[action]
         now = now or time.time()
         async with self.session() as s, s.begin():
-            payment = await s.get(Payment, payment_id)
+            # Lock the payment row first. Under PostgreSQL's default isolation, two callers could otherwise both read "paid", both
+            # wait for the user's row, and both take the plan's days back (the loser's compare-and-set below only fails AFTER it
+            # has already changed the user, and returning normally commits that). SQLite serialises writers, which hid this.
+            payment = (await s.execute(select(Payment).where(Payment.id == payment_id).with_for_update())).scalar_one_or_none()
             if payment is None:
                 return {"ok": False, "status": None, "changed": False, "entitlement": "none", "error": "Payment not found"}
             if payment.status == target:

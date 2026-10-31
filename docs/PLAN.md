@@ -84,5 +84,6 @@ Code layout (`src/hotload`):
 ### Launch readiness (2026-10-30) - review done, gates remain (see docs/LAUNCH.md)
 - [x] Four independent security reviews; every finding verified, fixed with regression tests, or recorded as accepted.
 - [x] `python -m hotload.preflight` checks a deployment's configuration; drafts of Terms/Privacy/DMCA/Refund in docs/legal.
-- [ ] Gates only you can pass: legal review, payment-processor decisions, staging with the hardened Compose overlay (never run),
+- [x] Checklist run (2026-10-31): PostgreSQL migrations/suite/restore drill and the egress proxy's deny rules were run for real; four bugs found and fixed (docs/LAUNCH.md 2a).
+- [ ] Gates only you can pass: legal review, payment-processor decisions, staging with the full hardened Compose overlay (only its egress proxy has been run),
   real Paystack/BTCPay/S3/OAuth/Telegram/SMTP runs, load testing (none done).
