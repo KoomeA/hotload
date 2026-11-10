@@ -1,7 +1,10 @@
 import asyncio
+import contextlib
+import os
 
 from alembic import context
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
 config = context.config
@@ -35,4 +38,28 @@ async def run_async() -> None:
     await engine.dispose()
 
 
-asyncio.run(run_async())
+@contextlib.contextmanager
+def sqlite_file_lock(url: str):
+    """The same protection as the PostgreSQL advisory lock, for a SQLite file (the self-hosted default): an exclusive lock on a
+    sidecar file, held while migrating. Without it the API and the worker, started together on a new volume, both try to create
+    the schema and the loser crashes ("table alembic_version already exists")."""
+    parsed = make_url(url)
+    if not parsed.drivername.startswith("sqlite") or not parsed.database or parsed.database == ":memory:":
+        yield
+        return
+    try:
+        import fcntl
+    except ImportError:  # Windows: no flock; single-process development there is unaffected
+        yield
+        return
+    os.makedirs(os.path.dirname(os.path.abspath(parsed.database)), exist_ok=True)
+    with open(parsed.database + ".migrate.lock", "w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)  # blocks until the other process has finished migrating
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+with sqlite_file_lock(config.get_main_option("sqlalchemy.url")):
+    asyncio.run(run_async())

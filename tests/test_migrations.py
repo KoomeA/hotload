@@ -38,3 +38,22 @@ async def test_m2_database_is_adopted_and_keeps_its_data(tmp_path):
     cols = {r[1] for r in sqlite3.connect(path).execute("pragma table_info(users)")}
     assert "tier_expires" in cols
     await db.dispose()
+
+
+async def test_processes_that_start_together_on_a_fresh_sqlite_file_do_not_race(tmp_path):
+    """The API and the worker both migrate at startup, and a self-hosted first run starts them at the same moment on a new
+    database file. Without a lock the loser crashed with "table alembic_version already exists"."""
+    import asyncio
+    import sys
+
+    code = ("import asyncio, sys; from hotload.config import Settings; from hotload.db import Database\n"
+            "async def main():\n"
+            "    db = Database(Settings(data_dir=sys.argv[1])); await db.migrate(); await db.dispose()\n"
+            "asyncio.run(main())")
+    for round_ in range(3):
+        data = tmp_path / f"round{round_}"
+        procs = [await asyncio.create_subprocess_exec(sys.executable, "-c", code, str(data), stdout=asyncio.subprocess.PIPE,
+                                                      stderr=asyncio.subprocess.PIPE) for _ in range(4)]
+        outputs = await asyncio.gather(*(p.communicate() for p in procs))
+        failed = [err.decode()[-200:] for p, (_, err) in zip(procs, outputs, strict=True) if p.returncode != 0]
+        assert failed == [], f"round {round_}"
